@@ -54,6 +54,7 @@ A snapshot holds processed weights, so anything that changes how weights are pro
 ### Quality check
 
 `experimental/quality/quality.py` (GSM8K and HumanEval against a running server; see its docstring for the data files and the no-network HumanEval run).
+`experimental/quality/prefill_block.py` measures what a long prefill does to other requests: gaps in a stream that is already generating, and time to first token for short requests arriving meanwhile.
 `experimental/quality/agent_tools.py` runs five small agent tasks (list, read, search and write files in an in-memory tree) streamed and not streamed, and checks the result; `python3 agent_tools.py http://<head>:8002`.
 
 ## Results
@@ -127,6 +128,11 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
     indices. `gb10_sparse_mla.py` is a Triton kernel for GLM's NoPE MLA (one
     program per query, all 16 heads, 32 gathered keys per block) that runs
     3.3x faster. `VLLM_TRITON_SPARSE_MLA=0` goes back to FlashInfer.
+    At decode sizes (a request's 1 + 7 draft tokens) one program per query
+    left most of the 48 SMs idle, and FlashInfer decoded 3-6% faster; below
+    96 query tokens the kernel now splits each token's rows across programs
+    and combines them (4.4x faster at 8 tokens), which recovers most of that
+    without FlashInfer's per-step host sync and keeps Triton's prefill.
   - FlashKDA needs dense q, k and v, and the KDA short conv wrote them as one
     [tokens, 3 x 2048] tensor, so each KDA layer copied three 56 MB tensors
     per 16k-token step. `causal_conv1d.py` gains an `out_group` argument that
