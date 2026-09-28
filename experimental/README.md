@@ -40,6 +40,7 @@ Leave a compose file out to drop that piece, or set its switch in `.env` (every 
 | `VLLM_MOE_PREFILL` | 1 | prefill MoE kernel for batches of `VLLM_MOE_PREFILL_MIN_TOKENS` (1024) or more |
 | `VLLM_MOE_PREFILL_Y8` | 1 | FP8 per-expert rows in the fused prefill MoE |
 | `VLLM_TRITON_SPARSE_MLA` | 1 | Triton sparse MLA instead of FlashInfer's (fixes.yaml) |
+| `VLLM_GLM5NEXT_DRAFT_POOL` | 1 | the drafter's KV in its own small pool instead of a page in every KV block: ~40% more KV tokens (fixes.yaml) |
 | `VLLM_DENSE_W4` | in_proj, o_proj, shared experts, drafter | regex of dense layers stored as NVFP4 (the rest are FP8); add `\|lm_head$` for the opt-in NVFP4 lm_head |
 | `VLLM_DENSE_FP8_LM_HEAD` | 1 | FP8 lm_head |
 | `VLLM_ADAPTIVE_K_COST_MS` | measured on this stack | step cost per verify length, used by the adaptive-k scheduler |
@@ -130,6 +131,16 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
     per 16k-token step. `causal_conv1d.py` gains an `out_group` argument that
     writes each group of features as its own dense tensor, and `kda.py` uses
     it. The outputs are bit-identical; prefill +2-3%.
+  - The DFlash2 drafter's KV rode the target's pool: every 2304-token block
+    carried the drafter's pages for its five layers, 30% of the KV cache,
+    though a sliding-window layer only ever holds its 2048-token window.
+    `kv_cache_utils.py`, `kv_cache_coordinator.py`, `kv_cache_interface.py`,
+    `worker_utils.py` and `warmup.py` give the drafter's group its own pool
+    (sized for `max_num_seqs` windows plus one prefill chunk, 105 blocks,
+    0.58 GiB) and keep its block ids out of the target's zeroing and warmup.
+    At the same 26 GiB pin: 1,416 -> 1,976 blocks, 2.63M -> 3.67M KV tokens.
+    Draft acceptance and speed are unchanged. `VLLM_GLM5NEXT_DRAFT_POOL=0`
+    goes back; `VLLM_GLM5NEXT_DRAFT_POOL_BLOCKS` sets the pool's size.
 - **sp** (`fixes/model.py`): sequence parallelism for prefill. A forward of
   at least 1024 tokens keeps the residual stream split across the TP ranks, so
   mHC and the norms run on a quarter of the tokens, with an all-gather before
