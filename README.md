@@ -462,4 +462,16 @@ The right entry is the RoCE v2 one for the box's static fabric address.
 `image/patches/LICENSE.MiaAI-Lab`) ·
 [tonyliu312](https://github.com/tonyliu312) (28 GiB KV pin) ·
 [nacyot](https://artifacts.nacyot.com/vllm-spin-wait-gb10-en/) (spin wait) ·
-[alexellis](https://github.com/alexellis/glm-5.3-flash-4x-dgx-spark-switchless)
+[alexellis](https://github.com/alexellis/glm-5.3-flash-4x-dgx-spark-switchless),
+and [RigMark](https://github.com/alexellis/rigmark) for the gate ·
+[incoai](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2) (the DFlash2 drafter) ·
+[NNNtrance](https://github.com/NNNtrance/GLM-5.3-Flash-EXL3-DGX-Spark) (the fail-closed
+tool parser idea) ·
+[Chuck](https://github.com/chuck-ads) (the RDMA path MTU, [#6](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/pull/6), and the
+streamed tool call and page cache reports, [#7](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/issues/7)) ·
+[ayayalar](https://github.com/ayayalar) (the first-boot stall report behind the
+fabric check, [#5](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/issues/5))
+
+The files in `experimental/` that replace vLLM and FlashInfer files keep their
+Apache-2.0 headers, and [experimental/README.md](experimental/README.md#sources)
+lists which ones they are.
