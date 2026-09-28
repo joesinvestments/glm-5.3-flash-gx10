@@ -64,19 +64,20 @@ Single stream, thinking off, 512 tokens (`dev/repro/decode.py` prompts):
 | | structured | code | prose |
 |---|---|---|---|
 | v8, DFlash2 k=7 | 121.9 | 91.3 | 38.7 |
-| all overrides | 166.9 | 118.1 | 63.7 |
+| all overrides | 170.3 | 120.8 | 65.8 |
 
 Concurrent streams, aggregate tok/s at 1/2/4/8 streams: v8 85.5/65.4/99.5/147.8,
-all overrides 122.5/99.8/139.3/189.8. RigMark (reasoning=low) code / prose /
-structured 101.2 / 59.8 / 153.9 tok/s, 64k cold prefill 4,885 tok/s. Needle
-retrieval 12/12 up to 507k tokens.
+all overrides 125.2/102.5/145.7/191.6 (16 streams: 251.3). RigMark
+(reasoning=low) code / prose / structured 107.9 / 61.7 / 157.1 tok/s. Needle
+retrieval 12/12 up to 507k tokens. KV cache 3.67M tokens per rank at the
+26 GiB pin (2.63M before the drafter got its own pool).
 
 Cold prefill, tok/s (random-word prompts, nothing cached):
 
 | | 32k | 128k |
 |---|---|---|
 | v8 | 2,730 | 2,679 |
-| all overrides | 4,956 | 4,808 |
+| all overrides | 4,946 | 4,750 |
 
 Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
