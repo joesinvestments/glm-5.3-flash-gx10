@@ -286,7 +286,8 @@ the boot:
   a fabric port down or below 200 Gb/s, a port MTU below 9000, a PCIe link
   below its maximum, one ConnectX root instead of two, link flaps, RDMA
   retransmit counters, GPU clock-limit events, other GPU processes, too little
-  host memory for the TP size and KV pin, swap in use, a model directory on
+  host memory for the TP size and KV pin, page cache the GPU cannot use yet
+  (it evicts the model files' cached pages itself), swap in use, a model directory on
   NFS, no disk for the first weight snapshot, an unpatched chat template, and
   a memlock limit. `PREFLIGHT=0` skips it.
 - `fabric check`, on the head, after every rank has joined (before vLLM

@@ -258,6 +258,29 @@ preflight() {
   avail=$(( $(awk '/MemAvailable/ {print $2}' /proc/meminfo) >> 20 ))
   (( avail >= need )) && row "host memory" "${avail} GiB free, ~${need} GiB needed" ok \
     || row "host memory" "${avail} GiB free, ~${need} GiB needed (stop other models; lower KV_CACHE_MEMORY)" WARN
+  # MemAvailable counts the page cache as free, but on GB10 CUDA allocations
+  # can fail before the kernel reclaims it: NCCL's init died "out of memory"
+  # with ~113 GB cached after a weight copy. Drop the model files' own cached
+  # pages (no privilege needed), then say how to drop the rest.
+  unfree() { echo $(( $(awk '/MemFree/ {print $2}' /proc/meminfo) >> 20 )); }
+  if (( $(unfree) < need )); then
+    python3 - "$MODEL" "${DFLASH_MODEL:-/models/glm-5.3-flash-dflash2}" "${VLLM_WEIGHT_SNAPSHOT_DIR:-}" <<'PY' 2>/dev/null || true
+import os, sys
+for root in filter(None, sys.argv[1:]):
+    for dirpath, _, files in os.walk(root):
+        for name in files:
+            try:
+                fd = os.open(os.path.join(dirpath, name), os.O_RDONLY)
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                os.close(fd)
+            except OSError:
+                pass
+PY
+  fi
+  local memfree; memfree=$(unfree)
+  local cached; cached=$(( $(awk '/^Cached:/ {print $2}' /proc/meminfo) >> 20 ))
+  (( memfree >= need )) && row "page cache" "${cached} GiB cached, ${memfree} GiB free" ok \
+    || row "page cache" "${cached} GiB cached, ${memfree} GiB free, ~${need} GiB needed (GPU allocations may fail: on the host, sync; echo 3 | sudo tee /proc/sys/vm/drop_caches)" WARN
   swap=$(( ( $(awk '/SwapTotal/ {print $2}' /proc/meminfo) - $(awk '/SwapFree/ {print $2}' /proc/meminfo) ) >> 20 ))
   (( swap < 1 )) || row "swap in use" "${swap} GiB (the GPU shares this memory; paging stalls it)" WARN
   fs=$(findmnt -n -o FSTYPE -T "${MODEL_DIR:-/models/glm-5.3-flash-nvfp4}" 2>/dev/null)
