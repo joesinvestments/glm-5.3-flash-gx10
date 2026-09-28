@@ -54,6 +54,7 @@ A snapshot holds processed weights, so anything that changes how weights are pro
 ### Quality check
 
 `experimental/quality/quality.py` (GSM8K and HumanEval against a running server; see its docstring for the data files and the no-network HumanEval run).
+`experimental/quality/agent_tools.py` runs five small agent tasks (list, read, search and write files in an in-memory tree) streamed and not streamed, and checks the result; `python3 agent_tools.py http://<head>:8002`.
 
 ## Results
 
