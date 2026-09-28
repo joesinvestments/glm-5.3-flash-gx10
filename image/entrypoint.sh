@@ -297,6 +297,14 @@ PY
   if grep -qF '<|begin_of_image|>' "$tmpl" 2>/dev/null && ! grep -q 'set thinking_off' "$tmpl"; then
     row "chat template" "checkpoint's own, unpatched (README section 4)" WARN
   fi
+  # A desktop session holds GPU memory and CPU on the shared memory, and these
+  # boxes ship with GDM enabled. systemd lists running units in /run/systemd/units.
+  if [[ -d /host/systemd-units ]]; then
+    local dm; dm=$(ls /host/systemd-units 2>/dev/null \
+      | sed -n 's/^invocation:\(gdm3\?\|lightdm\|sddm\|display-manager\)\.service$/\1/p' | head -1)
+    [[ -z $dm ]] && row "desktop session" "none" ok \
+      || row "desktop session" "$dm is running (sudo systemctl set-default multi-user.target && sudo systemctl isolate multi-user.target)" WARN
+  fi
   grep -q '^search \.$' /etc/resolv.conf 2>/dev/null && row "resolv.conf" "'search .' frozen in; bare hostnames fail (restart the container)" WARN
   echo "preflight ($warns warning$([[ $warns == 1 ]] || echo s)):"
   printf '%s\n' "${rows[@]}" | awk -F'|' '$3 == "WARN" {printf "  %-5s %-26s %s\n", $3, $1, $2}'

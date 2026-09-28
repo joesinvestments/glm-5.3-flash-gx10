@@ -30,6 +30,10 @@ here.
 - **Four ASUS GX10 or other GB10 boxes** (sm_121a, 128 GB unified memory).
   The model takes all of each box: ~91.9 GiB of GPU allocations per rank, with
   1.5-3 GiB left free (2026-09-23). Nothing else runs beside it.
+- **Each box running headless** (`multi-user.target`). These boxes ship with a
+  GNOME desktop enabled, and a desktop session takes memory and GPU time from
+  the model: `sudo systemctl set-default multi-user.target && sudo systemctl
+  isolate multi-user.target`. The preflight warns while one is running.
 - **A ConnectX-7 fabric between all four**, through one switch (ours is a
   MikroTik CRS812 at 200G), with RoCE working. Each box needs a static IPv4
   on its ConnectX interface, all in one subnet (`CLUSTER_SUBNET`), MTU 9000.
@@ -289,7 +293,7 @@ the boot:
   host memory for the TP size and KV pin, page cache the GPU cannot use yet
   (it evicts the model files' cached pages itself), swap in use, a model directory on
   NFS, no disk for the first weight snapshot, an unpatched chat template, and
-  a memlock limit. `PREFLIGHT=0` skips it.
+  a memlock limit, and a running desktop session. `PREFLIGHT=0` skips it.
 - `fabric check`, on the head, after every rank has joined (before vLLM
   starts): an NCCL all-reduce over the fabric with its bus bandwidth against
   the ~95 Gb/s per ConnectX root a healthy link gives, and every version,
