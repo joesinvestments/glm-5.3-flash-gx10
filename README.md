@@ -279,6 +279,25 @@ status page says whether torch or something else holds a box's memory.
 > network; put it behind something, or narrow `SEARCH_ROOTS`, on any network
 > you do not control.
 
+Two checks run at every start and print to the container log; neither stops
+the boot:
+
+- `preflight`, on every node, lists what makes the stack slow or fragile:
+  a fabric port down or below 200 Gb/s, a port MTU below 9000, a PCIe link
+  below its maximum, one ConnectX root instead of two, link flaps, RDMA
+  retransmit counters, GPU clock-limit events, other GPU processes, too little
+  host memory for the TP size and KV pin, swap in use, a model directory on
+  NFS, no disk for the first weight snapshot, an unpatched chat template, and
+  a memlock limit. `PREFLIGHT=0` skips it.
+- `fabric check`, on the head, after every rank has joined (before vLLM
+  starts): an NCCL all-reduce over the fabric with its bus bandwidth against
+  the ~95 Gb/s per ConnectX root a healthy link gives, and every version,
+  override file and knob that must match across nodes, with the ones that do
+  not. A fabric can link up at full rate and still move 12 Gb/s until the
+  boxes' power is drained; this is where that shows. `FABRIC_CHECK=0` skips
+  it; a node that cannot meet the others within `FABRIC_CHECK_TIMEOUT_S`
+  (120) skips it too.
+
 Host-level facts (GPU, PCI, RDMA counters, dmesg, systemd) come from
 spark-agent's separate per-machine agent, which is not part of this recipe.
 The container tools above cover the engine; diagnosing the fabric or the box
