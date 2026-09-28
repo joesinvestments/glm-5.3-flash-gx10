@@ -23,6 +23,7 @@
 #include <cuda_runtime.h>
 #include <infiniband/verbs.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -61,6 +62,7 @@ struct Ctl {                    // pinned; written by the GPU, read by the proxy
 struct PeerInfo {
   uint32_t qpn[kMaxWorld][2];
   uint8_t gid[2][16];
+  uint32_t mtu[2];  // per root: the port's active MTU (enum ibv_mtu)
   uint64_t ag_addr, rs_addr, flag_addr;
   uint32_t ag_rkey[2], rs_rkey[2], flag_rkey[2];
 };
@@ -462,6 +464,9 @@ py::bytes prepare(int64_t rank, int64_t world, std::string dev0, std::string dev
     ibv_gid gid;
     IBCK(ibv_query_gid(S.ctx[r], 1, gid_idx, &gid) == 0);
     memcpy(S.mine.gid[r], gid.raw, 16);
+    ibv_port_attr port{};
+    IBCK(ibv_query_port(S.ctx[r], 1, &port) == 0);
+    S.mine.mtu[r] = port.active_mtu;
     S.mine.ag_rkey[r] = S.ag_mr[r]->rkey;
     S.mine.rs_rkey[r] = S.rs_recv_mr[r]->rkey;
     S.mine.flag_rkey[r] = S.flag_mr[r]->rkey;
@@ -497,13 +502,16 @@ void connect(std::vector<std::string> infos) {
     for (int r = 0; r < 2; ++r) {
       if (j == S.rank) continue;
       ibv_qp_attr a{};
-      a.qp_state = IBV_QPS_RTR; a.path_mtu = IBV_MTU_4096; a.dest_qp_num = S.all[j].qpn[S.rank][r]; a.rq_psn = 0;
+      a.qp_state = IBV_QPS_RTR; a.path_mtu = (ibv_mtu)std::min(S.mine.mtu[r], S.all[j].mtu[r]); a.dest_qp_num = S.all[j].qpn[S.rank][r]; a.rq_psn = 0;
       a.max_dest_rd_atomic = 1; a.min_rnr_timer = 12;
       a.ah_attr.is_global = 1; a.ah_attr.port_num = 1; a.ah_attr.grh.hop_limit = 1;
       a.ah_attr.grh.sgid_index = S.gid_idx;
       memcpy(a.ah_attr.grh.dgid.raw, S.all[j].gid[r], 16);
       IBCK(ibv_modify_qp(S.qp[j][r], &a, IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
                                               IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER) == 0);
+      if (j == (S.rank + 1) % S.world)
+        fprintf(stderr, "arxbig rank %d root %d: path MTU %d bytes (ours %d, peer %d)\n", S.rank, r,
+                128 << a.path_mtu, 128 << S.mine.mtu[r], 128 << S.all[j].mtu[r]);
       a.qp_state = IBV_QPS_RTS; a.timeout = 14; a.retry_cnt = 7; a.rnr_retry = 7; a.sq_psn = 0; a.max_rd_atomic = 1;
       IBCK(ibv_modify_qp(S.qp[j][r], &a, IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
                                               IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC) == 0);

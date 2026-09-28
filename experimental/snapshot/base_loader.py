@@ -23,6 +23,19 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 logger = init_logger(__name__)
 
 
+def _optional(module: str, *names: str):
+    """`module`, or a stand-in whose `names` do nothing when it is not installed."""
+    import importlib
+    from types import SimpleNamespace
+
+    try:
+        return importlib.import_module(module)
+    except ModuleNotFoundError as e:
+        if e.name != module:
+            raise
+        return SimpleNamespace(**{n: (lambda *args, **kwargs: None) for n in names})
+
+
 class BaseModelLoader(ABC):
     """Base class for model loaders."""
 
@@ -60,8 +73,9 @@ class BaseModelLoader(ABC):
         """Load a model with the given configurations."""
         # Local weight snapshot (weight_snapshot.py): rebuild from it when
         # this rank has one, otherwise load normally and write one.
-        from vllm.model_executor.layers.fused_moe import megamoe_vllm
-        from vllm.model_executor.model_loader import dense_fp8
+        # fp8.yaml and megamoe.yaml mount these; without them their steps do nothing.
+        dense_fp8 = _optional("vllm.model_executor.model_loader.dense_fp8", "convert", "simulate_nvfp4")
+        megamoe_vllm = _optional("vllm.model_executor.layers.fused_moe.megamoe_vllm", "install")
         from vllm.model_executor.model_loader.weight_snapshot import Snapshot
 
         snapshot = Snapshot.for_model(vllm_config, model_config)

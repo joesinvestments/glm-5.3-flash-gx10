@@ -193,7 +193,15 @@ def convert(model: torch.nn.Module) -> None:
     lm_head = os.environ.get("VLLM_DENSE_FP8_LM_HEAD", "1") == "1"
     w4 = re.compile(os.environ["VLLM_DENSE_W4"]) if os.environ.get("VLLM_DENSE_W4") else None
     saved, count, count4 = 0, 0, 0
+    # Hand freed bf16 blocks back as we go: at TP=2 a rank holds ~91 GiB of
+    # weights on a 121.6 GiB box, and the allocator would otherwise keep every
+    # replaced weight reserved until the end and get the worker OOM-killed.
+    torch.cuda.empty_cache()
+    freed = 0
     for name, m in model.named_modules():
+        if freed >= 1 << 30:
+            torch.cuda.empty_cache()
+            freed = 0
         w = getattr(m, "weight", None)
         if not isinstance(w, torch.Tensor) or w.dtype != torch.bfloat16 or w.dim() != 2:
             continue
@@ -204,10 +212,12 @@ def convert(model: torch.nn.Module) -> None:
                 and isinstance(method, UnquantizedLinearMethod) and w.shape[1] % 128 == 0):
             _w4()
             saved += _quantize_w4(m)
+            freed += w.numel() * w.element_size()
             m.quant_method = W4DenseLinearMethod()
             count4 += 1
         elif isinstance(m, LinearBase) and isinstance(method, UnquantizedLinearMethod):
             saved += _quantize(m)
+            freed += w.numel() * w.element_size()
             m.quant_method = Fp8DenseLinearMethod()
             count += 1
         elif (lm_head and isinstance(m, ParallelLMHead) and w4 is not None and w4.search(name)
