@@ -40,10 +40,13 @@ Leave a compose file out to drop that piece, or set its switch in `.env` (every 
 | `VLLM_MOE_PREFILL` | 1 | prefill MoE kernel for batches of `VLLM_MOE_PREFILL_MIN_TOKENS` (1024) or more |
 | `VLLM_MOE_PREFILL_Y8` | 1 | FP8 per-expert rows in the fused prefill MoE |
 | `VLLM_TRITON_SPARSE_MLA` | 1 | Triton sparse MLA instead of FlashInfer's (fixes.yaml) |
+| `MAX_NUM_SEQS` | 50 | requests decoding at once (fixes.yaml); about 50 KDA states fit in the pinned KV pool, against the stock 32 |
 | `VLLM_GLM5NEXT_DRAFT_POOL` | 1 | the drafter's KV in its own small pool instead of a page in every KV block: ~40% more KV tokens (fixes.yaml) |
 | `VLLM_DENSE_W4` | in_proj, o_proj, shared experts, drafter | regex of dense layers stored as NVFP4 (the rest are FP8); add `\|lm_head$` for the opt-in NVFP4 lm_head |
 | `VLLM_DENSE_FP8_LM_HEAD` | 1 | FP8 lm_head |
-| `VLLM_ADAPTIVE_K_COST_MS` | measured on this stack | step cost per verify length, used by the adaptive-k scheduler |
+| `VLLM_ADAPTIVE_K_ONLINE` | 1 | adaptive-k learns the step cost while serving; 0 uses the fixed table below |
+| `VLLM_ADAPTIVE_K_MODEL` | fitted on this stack | starting step cost: ms, ms per expert touched, ms per verified token |
+| `VLLM_ADAPTIVE_K_COST_MS` | measured on this stack | with `VLLM_ADAPTIVE_K_ONLINE=0`: step cost per verify length |
 
 Debug switches: `VLLM_MOE_PREFILL_CHECK=N` and `VLLM_GLM_SP_MOE_CHECK=N` also run the stock path on the first N prefill batches and log the difference.
 
@@ -118,9 +121,13 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
   22-26, equally close to an fp32 reference. +7-8% prefill.
 - **adaptive-k** (`adaptive-k/adaptive_k.py`): a scheduler that picks how many
   of the 7 DFlash2 drafts each step verifies (2, 3, 4, 5 or 7). It uses recent
-  per-position acceptance and a measured cost per level
-  (`VLLM_ADAPTIVE_K_COST_MS`). The drafter uses Triton attention, which avoids
-  a mid-step host sync.
+  per-position acceptance, per request and averaged over all requests, and a
+  step cost it learns from measured step times: a fixed part, the MoE experts
+  the step's tokens touch, and a per-token part. Weight reads follow the
+  experts touched, so a 128-token step costs far less than a straight line
+  through small ones, and at 16+ streams the scheduler verifies more drafts
+  than a fixed table would allow. The drafter uses Triton attention, which
+  avoids a mid-step host sync.
 - **fixes** (`fixes/`): things found by profiling.
   - FlashInfer's MLA planner cloned a 136 MB metadata buffer on every step,
     only to roll it back on error.
@@ -188,6 +195,29 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
 
 `dense_fp8.simulate_nvfp4` is a diagnostic. It rounds the dense weights
 through NVFP4 to measure the quality cost: about +1% NLL on prose.
+
+## Sources
+
+Most of `fixes/`, and a few files elsewhere, are vLLM or FlashInfer files with
+our changes, bind-mounted over the originals in the image. They keep their
+Apache-2.0 headers. The rest is ours.
+
+| Origin | Files |
+|---|---|
+| vLLM, changed | `arx/cuda_communicator.py`; `fixes/attention.py`, `causal_conv1d.py`, `flashinfer_mla_sparse_sm90.py`, `gdn_attn.py`, `kda.py`, `kv_cache_coordinator.py`, `kv_cache_interface.py`, `kv_cache_utils.py`, `model.py`, `tilelang_kernels.py`, `warmup.py`, `worker_utils.py`; `snapshot/base_loader.py`, `flashinfer_cutlass_moe.py`, `modelopt.py` |
+| FlashInfer, changed | `fixes/_fa_common.py` |
+| ours | `arx/arx.py`, `arx_vllm.cu`, `arxbig.cu`; `adaptive-k/adaptive_k.py`; `fixes/gb10_sparse_mla.py`; `megamoe/`; `snapshot/weight_snapshot.py`, `dense_fp8.py`; `quality/` |
+
+Other people's work in here:
+
+- arx and arxbig take the RDMA path MTU from the ports rather than assuming
+  4096, from [Chuck](https://github.com/chuck-ads)'s
+  [#6](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/pull/6).
+- `tilelang_kernels.py` carries vLLM's copy of SGLang's mHC kernel, credited
+  in the file.
+- The decode split in `gb10_sparse_mla.py` is the Flash-Decoding scheme (Dao
+  et al., 2023): split each query's keys across programs, then merge the
+  partial softmax results.
 
 ## Quality
 
