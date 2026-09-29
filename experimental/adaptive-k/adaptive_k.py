@@ -41,6 +41,13 @@ graph for attention (piecewise instead).
 
 If the file named by VLLM_ADAPTIVE_K_CONTROL holds "force N", every step
 verifies N drafts, which is how the cost table is measured.
+
+With VLLM_ADAPTIVE_K_CODE_MODE=1 (Chuck's idea), each request keeps its rates
+twice, once for text inside a ``` fence and once for text outside, and g is
+kept per mode too. Code accepts far longer draft runs than prose, so at a fence
+the request switches to that mode's rates at once instead of waiting for its
+average to move. A request is inside a fence after an odd number of tokens that
+contain ```.
 """
 
 import os
@@ -62,6 +69,7 @@ _PRIOR = 0.8
 _GLOBAL_ALPHA = 0.05
 _GLOBAL_DRIFT = 0.01
 _PER_REQUEST = os.environ.get("VLLM_ADAPTIVE_K_PER_REQUEST") == "1"
+_CODE_MODE = os.environ.get("VLLM_ADAPTIVE_K_CODE_MODE") == "1"
 _ONLINE = os.environ.get("VLLM_ADAPTIVE_K_ONLINE", "1") == "1"
 # Fitted on GLM-5.3-Flash at TP=4 on GB10 (k 2, 3, 5 and 7 forced, 1-32 streams, code,
 # prose and structured prompts): ms, ms per expert touched, ms per token.
@@ -134,6 +142,13 @@ class AdaptiveKScheduler(AsyncScheduler):
         self._force: int | None = None
         self._rates: dict[str, np.ndarray] = {}
         self._global = np.full(self.num_spec_tokens, _PRIOR)
+        # Code mode: g and each request's rates per mode (False: prose, True: code).
+        # self._rates holds each request's active mode's array.
+        self._globals = {False: self._global, True: np.full(self.num_spec_tokens, _PRIOR)}
+        self._mode_rates: dict[str, dict[bool, np.ndarray]] = {}
+        self._in_code: dict[str, bool] = {}
+        self._scanned: dict[str, int] = {}
+        self._fence_ids = self._find_fence_tokens() if _CODE_MODE else frozenset()
         self._k = self.num_spec_tokens
         self._last_log = 0.0
         self._steps: Counter[int] = Counter()
@@ -145,6 +160,33 @@ class AdaptiveKScheduler(AsyncScheduler):
         else:
             logger.info("adaptive k: levels %s, cost %s", self._levels,
                         dict(zip(self._cost_x.astype(int).tolist(), self._cost_y.tolist())))
+
+    def _find_fence_tokens(self) -> frozenset[int]:
+        """Every token id whose text contains ```."""
+        from vllm.tokenizers.registry import cached_tokenizer_from_config
+
+        tok = cached_tokenizer_from_config(self.vllm_config.model_config)
+        ids = frozenset(i for i in range(len(tok)) if "```" in tok.decode([i]))
+        logger.info("adaptive k: code mode on, %d fence tokens", len(ids))
+        return ids
+
+    def _track_fences(self, req_ids: list[str]) -> None:
+        """Flip a request's mode at each fence in its new output, and swap in that mode's rates."""
+        for r in req_ids:
+            request = self.requests.get(r)
+            if request is None:
+                continue
+            out = request.output_token_ids
+            start = self._scanned.get(r, 0)
+            fences = sum(t in self._fence_ids for t in out[start:])
+            self._scanned[r] = len(out)
+            if fences % 2 == 0:
+                continue
+            mode = self._in_code[r] = not self._in_code.get(r, False)
+            modes = self._mode_rates.setdefault(r, {})
+            if r in self._rates:
+                modes[not mode] = self._rates[r]
+            self._rates[r] = modes.setdefault(mode, self._globals[mode].copy())
 
     def update_from_output(self, scheduler_output, model_runner_output):
         if self._model is not None:
@@ -186,7 +228,7 @@ class AdaptiveKScheduler(AsyncScheduler):
                                                 num_invalid_spec_tokens, request_id)
 
     def _observe(self, req_id: str, drafted: int, accepted: int) -> None:
-        g = self._global
+        g = self._globals[self._in_code.get(req_id, False)]
         c = self._rates.get(req_id)
         if c is None:
             c = self._rates[req_id] = g.copy()
@@ -257,6 +299,10 @@ class AdaptiveKScheduler(AsyncScheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         for req_id in [r for r in self._rates if r not in self.requests]:
             del self._rates[req_id]
+            for d in (self._mode_rates, self._in_code, self._scanned):
+                d.pop(req_id, None)
+        if _CODE_MODE:
+            self._track_fences(list(scheduler_output.num_scheduled_tokens))
         self._read_control()
         if self.num_spec_tokens and _PER_REQUEST and self._force is None:
             per = self._choose_per_request(list(scheduler_output.num_scheduled_tokens))
