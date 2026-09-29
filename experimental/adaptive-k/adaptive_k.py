@@ -47,9 +47,10 @@ output that accept far longer draft runs than prose: code inside ``` fences,
 and tool calls between <tool_call> and </tool_call>. Each request keeps them
 beside its usual rates, updated only while it is in that mode, and each mode
 has its own g. "gated" uses a mode's rates only when every decoding request is
-in that mode, since the batch shares one k; "1" uses them per request. A fence
-is a run of three backticks, which the tokenizer can split across tokens (a
-closing fence becomes "``" then "`\n"), so runs are counted across tokens.
+in that mode, since the batch shares one k, and is the default; "1" uses them
+per request, and "0" turns code mode off. A fence is a run of three backticks,
+which the tokenizer can split across tokens (a closing fence becomes "``" then
+"`\n"), so runs are counted across tokens.
 """
 
 import os
@@ -71,7 +72,7 @@ _PRIOR = 0.8
 _GLOBAL_ALPHA = 0.05
 _GLOBAL_DRIFT = 0.01
 _PER_REQUEST = os.environ.get("VLLM_ADAPTIVE_K_PER_REQUEST") == "1"
-_CODE_MODE = os.environ.get("VLLM_ADAPTIVE_K_CODE_MODE", "0")  # "0", "1" or "gated"
+_CODE_MODE = os.environ.get("VLLM_ADAPTIVE_K_CODE_MODE", "gated")  # "gated", "1" or "0" (off)
 _PROSE, _CODE, _TOOL = 0, 1, 2
 _ONLINE = os.environ.get("VLLM_ADAPTIVE_K_ONLINE", "1") == "1"
 # Fitted on GLM-5.3-Flash at TP=4 on GB10 (k 2, 3, 5 and 7 forced, 1-32 streams, code,
