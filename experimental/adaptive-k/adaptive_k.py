@@ -42,13 +42,14 @@ graph for attention (piecewise instead).
 If the file named by VLLM_ADAPTIVE_K_CONTROL holds "force N", every step
 verifies N drafts, which is how the cost table is measured.
 
-With VLLM_ADAPTIVE_K_CODE_MODE=1 (Chuck's idea), each request keeps its rates
-twice, once for text inside a ``` fence and once for text outside, and g is
-kept per mode too. Code accepts far longer draft runs than prose, so at a fence
-the request switches to that mode's rates at once instead of waiting for its
-average to move. A fence is a run of three backticks, which the tokenizer can
-split across tokens (a closing fence becomes "``" then "`\n"), so backtick runs
-are counted across tokens; a request is inside a fence after an odd number.
+VLLM_ADAPTIVE_K_CODE_MODE (Chuck's idea) also keeps rates for two kinds of
+output that accept far longer draft runs than prose: code inside ``` fences,
+and tool calls between <tool_call> and </tool_call>. Each request keeps them
+beside its usual rates, updated only while it is in that mode, and each mode
+has its own g. "gated" uses a mode's rates only when every decoding request is
+in that mode, since the batch shares one k; "1" uses them per request. A fence
+is a run of three backticks, which the tokenizer can split across tokens (a
+closing fence becomes "``" then "`\n"), so runs are counted across tokens.
 """
 
 import os
@@ -70,7 +71,8 @@ _PRIOR = 0.8
 _GLOBAL_ALPHA = 0.05
 _GLOBAL_DRIFT = 0.01
 _PER_REQUEST = os.environ.get("VLLM_ADAPTIVE_K_PER_REQUEST") == "1"
-_CODE_MODE = os.environ.get("VLLM_ADAPTIVE_K_CODE_MODE") == "1"
+_CODE_MODE = os.environ.get("VLLM_ADAPTIVE_K_CODE_MODE", "0")  # "0", "1" or "gated"
+_PROSE, _CODE, _TOOL = 0, 1, 2
 _ONLINE = os.environ.get("VLLM_ADAPTIVE_K_ONLINE", "1") == "1"
 # Fitted on GLM-5.3-Flash at TP=4 on GB10 (k 2, 3, 5 and 7 forced, 1-32 streams, code,
 # prose and structured prompts): ms, ms per expert touched, ms per token.
@@ -143,15 +145,19 @@ class AdaptiveKScheduler(AsyncScheduler):
         self._force: int | None = None
         self._rates: dict[str, np.ndarray] = {}
         self._global = np.full(self.num_spec_tokens, _PRIOR)
-        # Code mode: g and each request's rates per mode (False: prose, True: code).
-        # self._rates holds each request's active mode's array.
-        self._globals = {False: self._global, True: np.full(self.num_spec_tokens, _PRIOR)}
-        self._mode_rates: dict[str, dict[bool, np.ndarray]] = {}
-        self._in_code: dict[str, bool] = {}
+        # Code mode: per (request, mode) rates, per-mode g, and each request's mode.
+        self._mode_rates: dict[tuple[str, int], np.ndarray] = {}
+        self._mode_global = {m: np.full(self.num_spec_tokens, _PRIOR) for m in (_CODE, _TOOL)}
+        self._mode: dict[str, int] = {}
+        self._in_fence: dict[str, bool] = {}
+        self._in_tool: dict[str, bool] = {}
         self._scanned: dict[str, int] = {}
         self._run: dict[str, int] = {}  # backticks at the end of each request's output
         self._switches = 0
-        self._backticks = self._find_backtick_tokens() if _CODE_MODE else {}
+        self._backticks: dict[int, str] = {}
+        self._tool_open = self._tool_close = -1
+        if _CODE_MODE != "0":
+            self._load_mode_tokens()
         self._k = self.num_spec_tokens
         self._last_log = 0.0
         self._steps: Counter[int] = Counter()
@@ -164,49 +170,54 @@ class AdaptiveKScheduler(AsyncScheduler):
             logger.info("adaptive k: levels %s, cost %s", self._levels,
                         dict(zip(self._cost_x.astype(int).tolist(), self._cost_y.tolist())))
 
-    def _find_backtick_tokens(self) -> dict[int, str]:
-        """The text of every token that contains a backtick."""
+    def _load_mode_tokens(self) -> None:
+        """The text of every token holding a backtick, and the tool-call markers' ids."""
         from vllm.tokenizers.registry import cached_tokenizer_from_config
 
         tok = cached_tokenizer_from_config(self.vllm_config.model_config)
-        texts = {i: t for i in range(len(tok)) if "`" in (t := tok.decode([i]))}
-        logger.info("adaptive k: code mode on, %d tokens hold a backtick", len(texts))
-        return texts
+        self._backticks = {i: t for i in range(len(tok)) if "`" in (t := tok.decode([i]))}
+        self._tool_open = tok.convert_tokens_to_ids("<tool_call>")
+        self._tool_close = tok.convert_tokens_to_ids("</tool_call>")
+        logger.info("adaptive k: code mode %s, %d tokens hold a backtick, tool call markers %d/%d",
+                    _CODE_MODE, len(self._backticks), self._tool_open, self._tool_close)
 
-    def _count_fences(self, req_id: str, tokens) -> int:
-        """Fences in tokens, continuing the request's backtick run from its last output."""
-        run, fences = self._run.get(req_id, 0), 0
-        for t in tokens:
-            text = self._backticks.get(t)
-            if text is None:
-                run = 0
-                continue
-            for ch in text:
-                if ch != "`":
-                    run = 0
-                    continue
-                run += 1
-                fences += run == 3
-        self._run[req_id] = run
-        return fences
-
-    def _track_fences(self, req_ids: list[str]) -> None:
-        """Flip a request's mode at each fence in its new output, and swap in that mode's rates."""
+    def _track_modes(self, req_ids: list[str]) -> None:
+        """Advance each request's fence and tool-call state over its new output."""
         for r in req_ids:
             request = self.requests.get(r)
             if request is None:
                 continue
             out = request.output_token_ids
-            fences = self._count_fences(r, out[self._scanned.get(r, 0):])
-            self._scanned[r] = len(out)
-            if fences % 2 == 0:
-                continue
-            mode = self._in_code[r] = not self._in_code.get(r, False)
-            self._switches += 1
-            modes = self._mode_rates.setdefault(r, {})
-            if r in self._rates:
-                modes[not mode] = self._rates[r]
-            self._rates[r] = modes.setdefault(mode, self._globals[mode].copy())
+            run, fence, tool = self._run.get(r, 0), self._in_fence.get(r, False), self._in_tool.get(r, False)
+            for t in out[self._scanned.get(r, 0):]:
+                if t == self._tool_open or t == self._tool_close:
+                    tool, run = t == self._tool_open, 0
+                    continue
+                text = self._backticks.get(t)
+                if text is None:
+                    run = 0
+                    continue
+                for ch in text:
+                    if ch != "`":
+                        run = 0
+                        continue
+                    run += 1
+                    fence ^= run == 3
+            self._scanned[r], self._run[r], self._in_fence[r], self._in_tool[r] = len(out), run, fence, tool
+            mode = _TOOL if tool else _CODE if fence else _PROSE
+            self._switches += mode != self._mode.get(r, _PROSE)
+            self._mode[r] = mode
+
+    def _active_rates(self, decoding: list[str]) -> list[np.ndarray]:
+        """Each request's rates for choosing k: its mode's where code mode says so."""
+        if _CODE_MODE == "0":
+            return [self._rates[r] for r in decoding]
+        modes = [self._mode.get(r, _PROSE) for r in decoding]
+        if _CODE_MODE == "gated" and (len(set(modes)) > 1 or modes[0] == _PROSE):
+            return [self._rates[r] for r in decoding]
+        return [self._rates[r] if m == _PROSE else
+                self._mode_rates.setdefault((r, m), self._mode_global[m].copy())
+                for r, m in zip(decoding, modes)]
 
     def update_from_output(self, scheduler_output, model_runner_output):
         if self._model is not None:
@@ -238,8 +249,8 @@ class AdaptiveKScheduler(AsyncScheduler):
             self._last_model_log = now
             m = self._model
             logger.info("adaptive k: cost model base %.1f ms, %.3f ms/expert, %.3f ms/token, diversity %.2f, "
-                        "%d steps, mean error %.0f%%, %d code-mode switches", *m.x[:3], m.d, m.n, 100 * m.err,
-                        self._switches)
+                        "%d steps, mean error %.0f%%, %d code-mode switches", *m.x[:3], m.d, m.n,
+                        100 * m.err, self._switches)
 
     def make_spec_decoding_stats(self, spec_decoding_stats, num_draft_tokens, num_accepted_tokens,
                                  num_invalid_spec_tokens, request_id):
@@ -249,10 +260,18 @@ class AdaptiveKScheduler(AsyncScheduler):
                                                 num_invalid_spec_tokens, request_id)
 
     def _observe(self, req_id: str, drafted: int, accepted: int) -> None:
-        g = self._globals[self._in_code.get(req_id, False)]
+        g = self._global
         c = self._rates.get(req_id)
         if c is None:
             c = self._rates[req_id] = g.copy()
+        self._update(c, g, drafted, accepted)
+        mode = self._mode.get(req_id, _PROSE)
+        if mode != _PROSE:
+            gm = self._mode_global[mode]
+            self._update(self._mode_rates.setdefault((req_id, mode), gm.copy()), gm, drafted, accepted)
+
+    @staticmethod
+    def _update(c: np.ndarray, g: np.ndarray, drafted: int, accepted: int) -> None:
         for rates, alpha in ((c, _ALPHA), (g, _GLOBAL_ALPHA)):
             rates[:accepted] += alpha * (1.0 - rates[:accepted])
             if accepted < drafted:
@@ -291,7 +310,7 @@ class AdaptiveKScheduler(AsyncScheduler):
         decoding = [r for r in req_ids if r in self._rates]
         if not decoding:
             return self._k
-        survival = np.cumprod(np.stack([self._rates[r] for r in decoding]), axis=1).sum(axis=0)
+        survival = np.cumprod(np.stack(self._active_rates(decoding)), axis=1).sum(axis=0)
         expected = {k: len(decoding) + survival[:k].sum() for k in self._levels}
         score = {k: expected[k] / self._step_cost(len(decoding) * (k + 1)) for k in self._levels}
         best = max(score, key=score.get)
@@ -320,10 +339,12 @@ class AdaptiveKScheduler(AsyncScheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         for req_id in [r for r in self._rates if r not in self.requests]:
             del self._rates[req_id]
-            for d in (self._mode_rates, self._in_code, self._scanned, self._run):
+            for d in (self._mode, self._in_fence, self._in_tool, self._scanned, self._run):
                 d.pop(req_id, None)
-        if _CODE_MODE:
-            self._track_fences(list(scheduler_output.num_scheduled_tokens))
+            for m in (_CODE, _TOOL):
+                self._mode_rates.pop((req_id, m), None)
+        if _CODE_MODE != "0":
+            self._track_modes(list(scheduler_output.num_scheduled_tokens))
         self._read_control()
         if self.num_spec_tokens and _PER_REQUEST and self._force is None:
             per = self._choose_per_request(list(scheduler_output.num_scheduled_tokens))
