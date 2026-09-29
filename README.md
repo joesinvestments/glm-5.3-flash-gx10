@@ -1,11 +1,11 @@
-# GLM-5.3-Flash on ASUS GX10 (GB10): TP=2 or 4
+# GLM-5.3-Flash on ASUS GX10 (GB10): TP=2, 3, 4 or 6
 
 Need help? Join us on discord: https://discord.gg/M7XTrRJW3
 
-nvidia/GLM-5.3-Flash-NVFP4 served by vLLM on four GB10 boxes at TP=4, or two
-at TP=2, over RoCE. The base is an unmodified vLLM nightly with a few small
-patches, a newer FlashKDA, and [mentat](https://github.com/mmastrac/mentat) in
-place of Ray. What makes it fast:
+nvidia/GLM-5.3-Flash-NVFP4 served by vLLM on two, three, four or six GB10
+boxes (TP=2, 3, 4 or 6), over RoCE. The base is an unmodified vLLM nightly
+with a few small patches, a newer FlashKDA, and
+[mentat](https://github.com/mmastrac/mentat) in place of Ray. What makes it fast:
 
 - DFlash2 speculative decoding, with a scheduler that picks the draft length
   each step from a live model of step cost and acceptance.
@@ -25,26 +25,31 @@ Each of these lives in `experimental/`, replaces files inside the image this
 repo builds, and can be turned off. [experimental/README.md](experimental/README.md)
 has the details.
 
-| | TP=4, four boxes | TP=2, two boxes |
-|---|---|---|
-| prefill @32k, cold | 4,981 tok/s | 2,929 tok/s |
-| prefill @128k, cold | 4,822 tok/s | 2,864 tok/s |
-| decode, code / prose / structured | 106.6 / 59.5 / 161.6 tok/s | 60.5 / 36.4 / 89.5 tok/s |
-| code, 1 / 2 / 4 / 8 streams, aggregate | 129 / 150 / 201 / 240 tok/s | 74 / 84 / 117 / 130 tok/s |
-| KV pool (fp8_e4m3) | 4.40M tokens, 26 GiB pin | 1.10M tokens, 8 GiB pin |
-| longest request | 524k tokens | 160k tokens |
-| requests decoding at once | 64 | 16 |
-| boot, once snapshots exist | ~3 min | ~3 min |
-| needle recall | 12/12 up to 507k tokens | 6/6 up to 128k tokens |
+| | TP=4, four boxes | TP=2, two boxes | TP=3, three boxes | TP=6, six boxes |
+|---|---|---|---|---|
+| prefill @32k, cold | 4,981 tok/s | 2,929 tok/s | 3,555 tok/s | 4,907 tok/s |
+| prefill @128k, cold | 4,822 tok/s | 2,864 tok/s | 3,437 tok/s | 4,731 tok/s |
+| decode, code / prose / structured | 106.6 / 59.5 / 161.6 tok/s | 60.5 / 36.4 / 89.5 tok/s | 76.0 / 43.9 / 113.9 tok/s | 120.3 / 66.5 / 176.4 tok/s |
+| code, 1 / 2 / 4 / 8 streams, aggregate | 129 / 150 / 201 / 240 tok/s | 74 / 84 / 117 / 130 tok/s | 87 / 101 / 146 / 167 tok/s | 145 / 154 / 219 / 282 tok/s |
+| KV pool (fp8_e4m3) | 4.40M tokens, 26 GiB pin | 1.10M tokens, 8 GiB pin | 1.91M tokens, 12 GiB pin | 4.47M tokens, 26 GiB pin |
+| longest request | 524k tokens | 160k tokens | 524k tokens | 524k tokens |
+| requests decoding at once | 64 | 16 | 64 | 64 |
+| boot, once snapshots exist | ~3 min | ~3 min | not measured | not measured |
+| needle recall | 12/12 up to 507k tokens | 6/6 up to 128k tokens | 12/12 up to 480k tokens | 12/12 up to 480k tokens |
 
 Prefill is first-touch on random words, so nothing is cached. Decode is
 [RigMark](https://github.com/alexellis/rigmark)'s single-stream decode at
 temperature 0, reasoning effort low, with every output gate passing. Streams
 each generate 512 tokens from a different code prompt (`gate/conc_workload.py`).
+TP=3 (the mean of two three-box sets) and TP=6 were measured on other boxes
+and builds, TP=6 with GPU clocks locked at 1989 MHz.
+[experimental/tp3/README.md](experimental/tp3/README.md) has the details.
 
 TP=4 is the default. For two boxes, put `TP=2` in `compose/.env` on both.
 Each box then holds twice the weights, so the entrypoint picks a smaller KV
-pin, context length, request limit and batch budget.
+pin, context length, request limit and batch budget. TP=3 and TP=6 need a
+zero-padded copy of the checkpoint, since its head counts do not split by 3.
+[experimental/tp3/README.md](experimental/tp3/README.md) has the steps.
 
 `TP=RING4` is TP=4 on four boxes cabled in a loop instead of through a switch:
 each box's two ConnectX-7 ports go to its two neighbours. mentat places the
@@ -62,7 +67,8 @@ here.
 
 ## What you need
 
-- **Four ASUS GX10 or other GB10 boxes** (sm_121a, 128 GB unified memory), or two for TP=2.
+- **Four ASUS GX10 or other GB10 boxes** (sm_121a, 128 GB unified memory), or
+  two, three or six for TP=2, 3 or 6.
   The model takes all of each box: ~91.9 GiB of GPU allocations per rank, with
   1.5-3 GiB left free (2026-09-23). Nothing else runs beside it.
 - **Each box running headless** (`multi-user.target`). These boxes ship with a
@@ -350,9 +356,9 @@ into the image.
 |---|---|---|
 | `LONG_PREFILL_TOKEN_THRESHOLD` | 2304 | Caps one prefill's share of each scheduler step. Left at the default (budget − 256) a 120k prefill takes the whole step and a 12-token request waits 78–90 s; at 2304 it waited 4.83 s (2026-09-06). Must be a multiple of 2304, the KDA block size, because prefix caching snaps chunk ends to it: 2048 yields alternating 2048/256-token chunks. Costs nothing: the 200k prefill got *faster*. |
 | `MAX_NUM_BATCHED_TOKENS` | 16384 | Measured the same as 8192 at 200k once chunks are capped (234.1 s against 237.7 s, 2026-09-06). 8192 at TP=2, which leaves memory for its KV pin. |
-| `KV_CACHE_MEMORY` | 26 GiB | 8 GiB at TP=2. Pinned, `--gpu-memory-utilization` no longer sizes the pool, and vLLM says so at startup. At 28 GiB the head sat near 1 GiB free and eight long requests had a worker OOM-killed. |
+| `KV_CACHE_MEMORY` | 26 GiB | 8 GiB at TP=2, 12 GiB at TP=3. Pinned, `--gpu-memory-utilization` no longer sizes the pool, and vLLM says so at startup. At 28 GiB the head sat near 1 GiB free and eight long requests had a worker OOM-killed. |
 | `FABRIC_SUBNETS` | every address mentatd tags `rdma` | Each GB10's ConnectX-7 sits on two PCIe roots and one root tops out near 110 Gb/s. NCCL over both doubles all-reduce bandwidth (110 to 190 Gb/s) and took a 126k prefill from 2,412 to 2,680 tok/s (2026-09-26); decode did not move. Needs an IPv4 on the second root's interface in its own subnet, MTU 9000, the same RoCE v2 GID index on both roots, and both interfaces tagged `rdma` (step 4). To set it by hand instead, quote it and separate the subnets with spaces (`FABRIC_SUBNETS="198.18.0. 198.19.0."`). With only `CLUSTER_SUBNET` set, NCCL uses that one root. The numbers at the top use both. |
-| `MAX_NUM_SEQS` | 32 | Each running request holds a KDA recurrent state for every verify position (1+k = 8 at k=7) out of the KV pool, so the pool caps this, not throughput. With RecoverSSM, which keeps one state per request, it is 64 at TP=4 and 16 at TP=2. |
+| `MAX_NUM_SEQS` | 32 | Each running request holds a KDA recurrent state for every verify position (1+k = 8 at k=7) out of the KV pool, so the pool caps this, not throughput. With RecoverSSM, which keeps one state per request, it is 64 at TP=3, 4 and 6 and 16 at TP=2. |
 | DFlash2 `k=7` | | Decodes 121.9 / 91.3 / 38.7 tok/s structured / code / prose on this image without the overrides (`dev/repro/decode.py`, thinking off). On an earlier image (2026-09-23) it gave 109.8 / 88.8 / 52.6, and the checkpoint's own MTP head at k=4 gave 57.2 / 54.4 / 45.6. Costs ~41% of the KV pool: 3.44M tokens with speculation off, 2.02M with it at the same pin, on the pre-nightly image (2026-09-06). |
 | `MOE_BACKEND` | `flashinfer_cutlass` | NVFP4 weights and activations, quantizing activations with the checkpoint's own input scales. The MoE kernels in `experimental/` read its processed tensors, so they need it. `marlin` keeps activations in 16 bits and ignores the input scales. It ran on earlier images and is untested on this one. |
 | `SAFETENSORS_LOAD_STRATEGY` | eager | Loads in 511 s against 690 s for lazy. Unpinned, eager's buffers cost 38% of the KV cache; with the pin they cost nothing. |
