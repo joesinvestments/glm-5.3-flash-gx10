@@ -17,8 +17,8 @@ Every step, per layer, bit for bit:
   - the checkpoint is unchanged by the verify
   - after the commit: the recurrent state equals the stock slot n - 1, and the
     conv window at column 0 equals the stock window at column n - 1
-  - align mode (prefix caching): the state is committed to the block the
-    runner will read next, and a step that crosses a block boundary also
+  - align mode (prefix caching): the state is committed to the block holding
+    the last committed token, and a step that crosses a block boundary also
     leaves the stock state after the boundary token in the boundary block
 Runs with and without request_indices (spec rows interleaved with other rows)
 and with a trailing cudagraph padding row.
@@ -327,7 +327,8 @@ def run(k: int, align: bool, seed: int, chk: Checker, steps: int = 40,
         for i in range(B):
             n = n_sampled[i]
             nc = int(num_computed[i])
-            final_col = (nc + n) // block_size if align else 0
+            # The block holding the last committed token.
+            final_col = (nc + n - 1) // block_size if align else 0
             final_b = rs_block(i, final_col)
             for li, layer in enumerate(layers):
                 tag = f"k={k} align={align} seed={seed} step={step} layer={li} req={i} n={n}"

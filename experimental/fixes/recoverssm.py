@@ -205,7 +205,13 @@ def _prepare_commit_plan_kernel(
     HAS_REQUEST_INDICES: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
 ):
-    # Unchanged from Kimi-K3's RecoverSSM.
+    # Kimi-K3's RecoverSSM, except for the final state's column. Kimi-K3 uses
+    # n // block_size, where n is the committed count. When n ends exactly on a
+    # boundary, that is the next block, which align mode has not allocated
+    # yet, so the state was lost. This uses (n - 1) // block_size, the block
+    # holding the last token, as the stock align path does; the boundary block
+    # is then the final block itself. _record_state_block_kernel records the
+    # same column for the next step's pre-step copy.
     spec_idx = tl.program_id(0)
     source_state_idx = tl.load(state_indices_ptr + spec_idx * stride_state_indices).to(
         tl.int64
@@ -235,7 +241,8 @@ def _prepare_commit_plan_kernel(
         )
         final_num_computed = num_computed + commit_len
         final_state_col = tl.minimum(
-            final_num_computed // mamba_block_size, block_table_width - 1
+            tl.maximum(final_num_computed - 1, 0) // mamba_block_size,
+            block_table_width - 1,
         )
         final_state_idx = tl.load(
             block_table_ptr
@@ -374,8 +381,7 @@ def _replay_indices_kernel(
     boundary = tl.load(boundary_state_indices_ptr + i_n).to(tl.int32)
     boundary_len = tl.load(boundary_recovery_lens_ptr + i_n)
     row = tl.where(cols == commit_len - 1, final, null_block_id)
-    # A boundary at the last token shares its column with the final state;
-    # _copy_boundary_state_kernel covers that case.
+    # A boundary at the last token is the final state's own block.
     at_boundary = (
         (cols == boundary_len - 1)
         & (boundary_len < commit_len)
@@ -386,40 +392,6 @@ def _replay_indices_kernel(
     valid = (source > null_block_id) & (commit_len > 0) & (final > null_block_id)
     row = tl.where(valid, row, null_block_id)
     tl.store(replay_indices_ptr + i_n * (Q + 1) + cols, row, mask=cols < Q + 1)
-
-
-@triton.jit
-def _copy_boundary_state_kernel(
-    state_ref_ptr,
-    state_base_addrs_ptr,
-    state_block_strides_ptr,
-    commit_lens_ptr,
-    final_state_indices_ptr,
-    boundary_state_indices_ptr,
-    boundary_recovery_lens_ptr,
-    null_block_id,
-    STATE_SIZE: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    # The accepted tokens end exactly on a block boundary, so the boundary
-    # block gets a byte copy of the final state.
-    i_n = tl.program_id(0)
-    i_l = tl.program_id(1)
-    i_c = tl.program_id(2)
-    commit_len = tl.load(commit_lens_ptr + i_n)
-    boundary = tl.load(boundary_state_indices_ptr + i_n).to(tl.int64)
-    boundary_len = tl.load(boundary_recovery_lens_ptr + i_n)
-    if (commit_len == 0) | (boundary <= null_block_id) | (boundary_len != commit_len):
-        return
-    final = tl.load(final_state_indices_ptr + i_n).to(tl.int64)
-    state_ptr = tl.load(state_base_addrs_ptr + i_l).to(
-        tl.pointer_type(state_ref_ptr.dtype.element_ty)
-    )
-    block_stride = tl.load(state_block_strides_ptr + i_l)
-    offs = i_c * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < STATE_SIZE
-    values = tl.load(state_ptr + final * block_stride + offs, mask=mask)
-    tl.store(state_ptr + boundary * block_stride + offs, values, mask=mask)
 
 
 @dataclass
@@ -548,8 +520,6 @@ class Glm5NextRecoverSSMCommitContext:
     conv_state_token_strides: torch.Tensor
     conv_history_len: int
     layers: tuple[Any, ...]
-    state_base_addrs: torch.Tensor
-    state_block_strides: torch.Tensor
     lower_bound: float
     spec_query_len: int
     commit_lens: torch.Tensor
@@ -623,8 +593,6 @@ class Glm5NextRecoverSSMCommitContext:
             conv_state_token_strides=_i64([s.stride(2) for s in conv_states]),
             conv_history_len=conv_history_len,
             layers=tuple(layers),
-            state_base_addrs=_i64([s.data_ptr() for s in checkpoints]),
-            state_block_strides=_i64([s.stride(0) for s in checkpoints]),
             lower_bound=lower_bounds.pop(),
             spec_query_len=spec_query_len,
             commit_lens=_i32(rows),
@@ -774,26 +742,6 @@ class Glm5NextRecoverSSMCommitContext:
                 g_bias=layer.dt_bias,
                 compute_gate=True,
                 lower_bound=self.lower_bound,
-            )
-
-        if align:
-            state_ref = self.layers[0].kv_cache[1]
-            state_size = state_ref[0].numel()
-            block = 4096
-            _copy_boundary_state_kernel[
-                (batch, num_layers, triton.cdiv(state_size, block))
-            ](
-                state_ref,
-                self.state_base_addrs,
-                self.state_block_strides,
-                self.commit_lens,
-                self.final_state_indices,
-                self.boundary_state_indices,
-                self.boundary_recovery_lens,
-                NULL_BLOCK_ID,
-                STATE_SIZE=state_size,
-                BLOCK=block,
-                num_warps=4,
             )
 
 
@@ -1081,6 +1029,64 @@ class Glm5NextRecoverSSMBackend(GDNAttentionBackend):
         return Glm5NextRecoverSSMMetadataBuilder
 
 
+@triton.heuristics(
+    {"HAS_REQUEST_INDICES": lambda args: args["request_indices_ptr"] is not None}
+)
+@triton.jit
+def _record_state_block_kernel(
+    idx_mapping_ptr,
+    num_sampled_ptr,
+    request_indices_ptr,
+    num_computed_ptr,
+    state_idx_ptr,
+    num_accepted_ptr,
+    HAS_REQUEST_INDICES: tl.constexpr,
+    MAMBA_BLOCK_SIZE: tl.constexpr,
+    BLOCK_TABLE_WIDTH: tl.constexpr,
+):
+    # The runner's _postprocess_recoverssm_align_kernel, except for the column:
+    # the commit left the state in the block holding the last committed token.
+    spec_idx = tl.program_id(0)
+    batch_idx = spec_idx
+    if HAS_REQUEST_INDICES:
+        batch_idx = tl.load(request_indices_ptr + spec_idx)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    if req_state_idx < 0:
+        return
+    num_sampled = tl.load(num_sampled_ptr + batch_idx)
+    num_computed = tl.load(num_computed_ptr + batch_idx)
+    last = tl.maximum(num_computed + num_sampled - 1, 0)
+    tl.store(
+        state_idx_ptr + req_state_idx,
+        tl.minimum(last // MAMBA_BLOCK_SIZE, BLOCK_TABLE_WIDTH - 1),
+    )
+    tl.store(num_accepted_ptr + req_state_idx, 1)
+
+
+def record_state_blocks(
+    meta: RecoverSSMPostprocessMetadata,
+    idx_mapping: torch.Tensor,
+    num_sampled: torch.Tensor,
+    state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+) -> None:
+    """Point each committed request's running state column at its state block.
+
+    The next step's pre-step copy moves it from there when the step's tokens
+    pass into the next block.
+    """
+    _record_state_block_kernel[(meta.num_spec_decodes,)](
+        idx_mapping,
+        num_sampled,
+        meta.request_indices,
+        meta.num_computed_tokens,
+        state_indices,
+        num_accepted_tokens,
+        MAMBA_BLOCK_SIZE=meta.block_size,
+        BLOCK_TABLE_WIDTH=meta.block_table.shape[1],
+    )
+
+
 @cache
 def model_state_cls() -> type:
     """MambaHybridModelState with the runner's RecoverSSM commit hook.
@@ -1088,14 +1094,36 @@ def model_state_cls() -> type:
     The stock state creates the hook only when cache_config.use_kda_recoverssm
     is set, which VllmConfig's validator allows for Kimi-K3 alone and resets
     on every re-validation (the DFlash loader re-validates after the target
-    model loads).
+    model loads). The hook records the state block with record_state_blocks.
     """
     from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
     from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
+    class Glm5NextRecoverSSMState(RecoverSSMState):
+        def commit_step(
+            self,
+            num_sampled: torch.Tensor | int,
+            idx_mapping: torch.Tensor,
+            *,
+            state_indices: torch.Tensor | None,
+            num_accepted_tokens: torch.Tensor,
+        ) -> None:
+            step = self._step
+            self._step = None
+            if isinstance(num_sampled, int) or step is None:
+                return
+            for metadata in step:
+                meta = metadata.commit_recoverssm_state(num_sampled)
+                if meta is None:
+                    continue
+                assert state_indices is not None
+                record_state_blocks(
+                    meta, idx_mapping, num_sampled, state_indices, num_accepted_tokens
+                )
+
     class Glm5NextRecoverSSMModelState(MambaHybridModelState):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
-            self.recoverssm = RecoverSSMState()
+            self.recoverssm = Glm5NextRecoverSSMState()
 
     return Glm5NextRecoverSSMModelState
