@@ -54,9 +54,14 @@ Leave a compose file out to drop that piece, or set its switch in `.env` (every 
 
 Debug switches: `VLLM_MOE_PREFILL_CHECK=N` and `VLLM_GLM_SP_MOE_CHECK=N` also run the stock path on the first N prefill batches and log the difference.
 
-### The snapshot tag
+### Snapshot version and tag
 
-A snapshot holds processed weights, so anything that changes how weights are processed needs a new `VLLM_WEIGHT_SNAPSHOT_TAG` (set in fp8.yaml) or a boot without restoring: changing `VLLM_DENSE_W4`, `VLLM_DENSE_FP8*`, the MoE backend, or `max_num_batched_tokens`. A shape change fails the restore with an error; a same-shape change (such as which layers are NVFP4) would restore stale weights without one.
+A snapshot holds processed weights. Its key covers the checkpoint, the TP layout, the MoE backend and `max_num_batched_tokens`. Two kinds of change need more:
+
+- A code change to how weights are processed (`weight_snapshot.py`, `dense_fp8.py`, the loader patches): bump `SNAPSHOT_VERSION` in `weight_snapshot.py`. Snapshot names start with `v<version>-`, and each boot deletes the snapshots of every other version from its snapshot directory, for all TP sizes.
+- A knob that changes processing (`VLLM_DENSE_W4`, `VLLM_DENSE_FP8*`): a new `VLLM_WEIGHT_SNAPSHOT_TAG` (set in fp8.yaml). Snapshots under the old tag stay on disk until the next version bump.
+
+A shape change fails the restore with an error. A same-shape change (such as which layers are NVFP4) would restore stale weights without one.
 
 ### Quality check
 

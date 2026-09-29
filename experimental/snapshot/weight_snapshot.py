@@ -12,11 +12,14 @@ views of kv_b_proj and the router's reference to e_score_correction_bias.
 Enabled by VLLM_WEIGHT_SNAPSHOT_DIR. VLLM_WEIGHT_SNAPSHOT_TAG joins the key for
 image-level patches that the vLLM version string cannot see. A snapshot is used
 only when its key matches exactly and it covers every tensor of the model;
-otherwise the rank loads normally and writes a new one.
+otherwise the rank loads normally and writes a new one. Names start with
+SNAPSHOT_VERSION, and opening the directory deletes snapshots of any other
+version.
 """
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 from dataclasses import asdict
@@ -27,6 +30,12 @@ from torch import nn
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# Bump when a change to weight processing or to this file's format makes
+# existing snapshots wrong in a way the key cannot see.
+SNAPSHOT_VERSION = 2
+# A snapshot or a partly written one, of any version (version 1 had no prefix).
+_SNAPSHOT_NAME = re.compile(r"(v\d+-)?(target|draft)-tp\d+of\d+-dp\d+-[0-9a-f]{16}(\.tmp\d+)?")
 
 _ALIGN = 4096
 _CHUNK = 64 << 20  # bytes per read; two pinned buffers of this size
@@ -82,7 +91,8 @@ class Snapshot:
         key["moe_backend"] = str(getattr(vllm_config.kernel_config, "moe_backend", ""))
         digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
         role = "draft" if is_draft else "target"
-        name = f"{role}-tp{key['tp_rank']}of{key['tp_size']}-dp{key['dp_rank']}-{digest}"
+        name = f"v{SNAPSHOT_VERSION}-{role}-tp{key['tp_rank']}of{key['tp_size']}-dp{key['dp_rank']}-{digest}"
+        _remove_other_versions(base)
         return cls(os.path.join(base, name), key)
 
     def complete(self) -> bool:
@@ -234,6 +244,29 @@ class Snapshot:
         logger.info("Weight snapshot: restored %d tensors (+%d views, %d copied), %d recreated caches, "
                     "%.1f GiB from %s in %.1f s", len(manifest["entries"]), len(manifest["aliases"]), copied,
                     created, manifest["bytes"] / 2**30, self.path, time.monotonic() - t0)
+
+
+def _remove_other_versions(base: str) -> None:
+    """Delete every snapshot in base whose version is not SNAPSHOT_VERSION.
+
+    Other files in base are left alone. Snapshots of this version for other
+    TP layouts or keys stay.
+    """
+    current = f"v{SNAPSHOT_VERSION}-"
+    try:
+        names = os.listdir(base)
+    except FileNotFoundError:
+        return
+    for n in names:
+        if not _SNAPSHOT_NAME.fullmatch(n) or n.startswith(current):
+            continue
+        path = os.path.join(base, n)
+        try:
+            size = os.path.getsize(os.path.join(path, "data.bin"))
+        except OSError:
+            size = 0
+        shutil.rmtree(path, ignore_errors=True)
+        logger.info("Weight snapshot: removed %s (%.1f GiB), not version %d", path, size / 2**30, SNAPSHOT_VERSION)
 
 
 def _module_flags(model: nn.Module) -> dict:

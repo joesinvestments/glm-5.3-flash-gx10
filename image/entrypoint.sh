@@ -331,7 +331,9 @@ PY
   # The first boot at a TP size writes a weight snapshot (snapshot.yaml).
   if [[ -n "${VLLM_WEIGHT_SNAPSHOT_DIR:-}" ]]; then
     free=$(df -BG --output=avail "${CACHE_ROOT:-/root/.cache}" 2>/dev/null | tail -1 | tr -dc 0-9)
-    if compgen -G "$VLLM_WEIGHT_SNAPSHOT_DIR/target-tp*of${tp}-*" >/dev/null; then row "weight snapshot" "present for TP=$tp" ok
+    ver=$(sed -n 's/^SNAPSHOT_VERSION = \([0-9]*\).*/\1/p' \
+      /usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/weight_snapshot.py 2>/dev/null)
+    if compgen -G "$VLLM_WEIGHT_SNAPSHOT_DIR/v${ver}-target-tp*of${tp}-*" >/dev/null; then row "weight snapshot" "present for TP=$tp" ok
     elif (( ${free:-0} >= 182 / tp + 5 )); then row "weight snapshot" "none yet for TP=$tp, ${free} GiB free" ok
     else row "weight snapshot" "none yet for TP=$tp, ${free:-?} GiB free, needs ~$(( 182 / tp )) GiB" WARN; fi
   fi

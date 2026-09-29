@@ -136,10 +136,11 @@ Memory and KV changes need the boot log's `GPU KV cache size` line before and
 after, and a run at `MAX_NUM_SEQS` streams with vLLM's `Running:` count, to
 show they all fit.
 
-Anything that changes how weights are processed needs a new
-`VLLM_WEIGHT_SNAPSHOT_TAG`, or a boot without restoring. A shape change fails
-the restore loudly. A same-shape change restores stale weights and says
-nothing.
+Anything that changes how weights are processed needs a bump of
+`SNAPSHOT_VERSION` in `experimental/snapshot/weight_snapshot.py` (code) or a
+new `VLLM_WEIGHT_SNAPSHOT_TAG` (environment knobs), or a boot without
+restoring. A shape change fails the restore loudly. A same-shape change
+restores stale weights and says nothing.
 
 ## Things that have cost a day
 
