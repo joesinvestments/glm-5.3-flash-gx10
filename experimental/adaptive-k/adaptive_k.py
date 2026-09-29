@@ -46,8 +46,9 @@ With VLLM_ADAPTIVE_K_CODE_MODE=1 (Chuck's idea), each request keeps its rates
 twice, once for text inside a ``` fence and once for text outside, and g is
 kept per mode too. Code accepts far longer draft runs than prose, so at a fence
 the request switches to that mode's rates at once instead of waiting for its
-average to move. A request is inside a fence after an odd number of tokens that
-contain ```.
+average to move. A fence is a run of three backticks, which the tokenizer can
+split across tokens (a closing fence becomes "``" then "`\n"), so backtick runs
+are counted across tokens; a request is inside a fence after an odd number.
 """
 
 import os
@@ -148,7 +149,9 @@ class AdaptiveKScheduler(AsyncScheduler):
         self._mode_rates: dict[str, dict[bool, np.ndarray]] = {}
         self._in_code: dict[str, bool] = {}
         self._scanned: dict[str, int] = {}
-        self._fence_ids = self._find_fence_tokens() if _CODE_MODE else frozenset()
+        self._run: dict[str, int] = {}  # backticks at the end of each request's output
+        self._switches = 0
+        self._backticks = self._find_backtick_tokens() if _CODE_MODE else {}
         self._k = self.num_spec_tokens
         self._last_log = 0.0
         self._steps: Counter[int] = Counter()
@@ -161,14 +164,31 @@ class AdaptiveKScheduler(AsyncScheduler):
             logger.info("adaptive k: levels %s, cost %s", self._levels,
                         dict(zip(self._cost_x.astype(int).tolist(), self._cost_y.tolist())))
 
-    def _find_fence_tokens(self) -> frozenset[int]:
-        """Every token id whose text contains ```."""
+    def _find_backtick_tokens(self) -> dict[int, str]:
+        """The text of every token that contains a backtick."""
         from vllm.tokenizers.registry import cached_tokenizer_from_config
 
         tok = cached_tokenizer_from_config(self.vllm_config.model_config)
-        ids = frozenset(i for i in range(len(tok)) if "```" in tok.decode([i]))
-        logger.info("adaptive k: code mode on, %d fence tokens", len(ids))
-        return ids
+        texts = {i: t for i in range(len(tok)) if "`" in (t := tok.decode([i]))}
+        logger.info("adaptive k: code mode on, %d tokens hold a backtick", len(texts))
+        return texts
+
+    def _count_fences(self, req_id: str, tokens) -> int:
+        """Fences in tokens, continuing the request's backtick run from its last output."""
+        run, fences = self._run.get(req_id, 0), 0
+        for t in tokens:
+            text = self._backticks.get(t)
+            if text is None:
+                run = 0
+                continue
+            for ch in text:
+                if ch != "`":
+                    run = 0
+                    continue
+                run += 1
+                fences += run == 3
+        self._run[req_id] = run
+        return fences
 
     def _track_fences(self, req_ids: list[str]) -> None:
         """Flip a request's mode at each fence in its new output, and swap in that mode's rates."""
@@ -177,12 +197,12 @@ class AdaptiveKScheduler(AsyncScheduler):
             if request is None:
                 continue
             out = request.output_token_ids
-            start = self._scanned.get(r, 0)
-            fences = sum(t in self._fence_ids for t in out[start:])
+            fences = self._count_fences(r, out[self._scanned.get(r, 0):])
             self._scanned[r] = len(out)
             if fences % 2 == 0:
                 continue
             mode = self._in_code[r] = not self._in_code.get(r, False)
+            self._switches += 1
             modes = self._mode_rates.setdefault(r, {})
             if r in self._rates:
                 modes[not mode] = self._rates[r]
@@ -218,7 +238,8 @@ class AdaptiveKScheduler(AsyncScheduler):
             self._last_model_log = now
             m = self._model
             logger.info("adaptive k: cost model base %.1f ms, %.3f ms/expert, %.3f ms/token, diversity %.2f, "
-                        "%d steps, mean error %.0f%%", *m.x[:3], m.d, m.n, 100 * m.err)
+                        "%d steps, mean error %.0f%%, %d code-mode switches", *m.x[:3], m.d, m.n, 100 * m.err,
+                        self._switches)
 
     def make_spec_decoding_stats(self, spec_decoding_stats, num_draft_tokens, num_accepted_tokens,
                                  num_invalid_spec_tokens, request_id):
@@ -299,7 +320,7 @@ class AdaptiveKScheduler(AsyncScheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         for req_id in [r for r in self._rates if r not in self.requests]:
             del self._rates[req_id]
-            for d in (self._mode_rates, self._in_code, self._scanned):
+            for d in (self._mode_rates, self._in_code, self._scanned, self._run):
                 d.pop(req_id, None)
         if _CODE_MODE:
             self._track_fences(list(scheduler_output.num_scheduled_tokens))
