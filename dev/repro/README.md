@@ -63,3 +63,56 @@ It needs roughly 4 GB free, so it cannot run while the engine holds
 were taken, and no measurement yet connects those M values to the ones the
 engine actually issues, so treat it as a separate finding rather than the cause
 of the two scripts above.
+
+# Determinism and prefix-cache scans
+
+Three scripts for checking a server, independent of the corruption above.
+`determinism.py` and `prefix_cache.py` use the standard library only and take
+`--url` and `--model`. Run them with no other traffic on the server: both flag
+requests that finished alongside theirs.
+
+## determinism.py
+
+`prompt` sends the same prompt three times at each of 3k, 6k, 10k, 14k and 40k
+tokens with `prompt_logprobs`, each under a fresh `cache_salt`, and reports per
+pair of runs how many logprobs differ, where the first difference is and the
+largest. `generate` does the same for 48 greedy tokens of one 5208-token prompt,
+six times.
+
+On stock kernels the runs differ from the first token (the marlin MoE above).
+With the MoE overrides the remaining differences came from the sparse
+indexer's top-k: it returned the selected pools in a run-dependent order, and
+where two pools tie at the k-th score it kept a run-dependent one of them. Both
+start at a fixed position and change every token after it. Ties are rare, one
+or two rows per layer in a 10k prompt, which is why they were not the entry
+point on the stock stack.
+
+## prefix_cache.py
+
+Fills the cache with one prompt, then sends a second prompt that shares its
+first L tokens three times: once able to hit the cache and twice under fresh
+salts. It compares the cache hit with a cold run, and the two cold runs with
+each other as the noise floor. A length where the hit differs earlier or by more
+than twice the floor runs twice more, and it fails only if all three runs do. The lengths default to multiples and half
+multiples of the served `block_size` and `mamba_block_size`.
+
+- A difference from the first generated token, or a large one early, at a
+  length that ends partway through a mamba block, is the pattern of
+  vllm-project/vllm#54076: a hit restores the KDA state from before the hit
+  point while the attention KV is complete.
+- Small differences that start 20 or more tokens in turn up now and then at a
+  random length with speculative decoding on, and do not repeat on a rerun.
+  They are not the cache.
+- Hits one block short of L are vLLM dropping the last block for speculative
+  decoding, on purpose.
+
+Run `determinism.py` first; this means nothing unless two cold runs agree.
+
+## topk_ties.py
+
+`top_k_per_row_prefill` on synthetic scores with an exact tie at the k-th value,
+200 calls on the same input. Needs one CUDA device and vLLM, no checkpoint.
+
+    1 row                    1 distinct output
+    64 rows x 1300           156-166 distinct outputs (two sessions)
+    16128 rows x 1300/8000   200 distinct outputs
