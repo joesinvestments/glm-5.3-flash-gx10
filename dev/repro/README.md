@@ -116,3 +116,15 @@ Run `determinism.py` first; this means nothing unless two cold runs agree.
     1 row                    1 distinct output
     64 rows x 1300           156-166 distinct outputs (two sessions)
     16128 rows x 1300/8000   200 distinct outputs
+
+## boundary_parity.py
+
+RecoverSSM's KDA state at a block boundary. The model repeats a passage from a
+prompt that ends ~150 tokens short of a mamba block boundary, in 16 variants
+that shift where the verify steps land, with k forced to 1 through adaptive-k's
+control file (the docstring has the commands). Each variant passes when its
+output reaches the passage's last line.
+
+Before the fix, with RecoverSSM on, 8 of 16 variants looped or turned to noise
+right after the boundary (TP=4, 2026-09-29). With `VLLM_GLM5NEXT_RECOVERSSM=0`,
+0 of 16. Needs `/usr/share/common-licenses/GPL-3` on the host that runs it.
