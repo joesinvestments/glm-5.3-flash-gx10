@@ -25,42 +25,42 @@ Each of these lives in `experimental/`, replaces files inside the image this
 repo builds, and can be turned off. [experimental/README.md](experimental/README.md)
 has the details.
 
-| | TP=4, four boxes | TP=2, two boxes | TP=3, three boxes | TP=6, six boxes |
+| | TP=2 | TP=3 | TP=4 | TP=6 |
 |---|---|---|---|---|
-| prefill @32k, cold | 4,981 tok/s | 2,929 tok/s | 3,847 tok/s | 4,907 tok/s |
-| prefill @128k, cold | 4,822 tok/s | 2,864 tok/s | 3,648 tok/s | 4,731 tok/s |
-| decode, code / prose / structured | 114.6 / 59.5 / 161.6 tok/s | 60.5 / 36.4 / 89.5 tok/s | 79.8 / 45.2 / 119.8 tok/s | 120.3 / 66.5 / 176.4 tok/s |
-| code, 1 / 2 / 4 / 8 streams, aggregate | 129 / 150 / 201 / 240 tok/s | 74 / 84 / 117 / 130 tok/s | 89 / 107 / 146 / 173 tok/s | 145 / 154 / 219 / 282 tok/s |
-| KV pool (fp8_e4m3) | 4.40M tokens, 26 GiB pin | 1.10M tokens, 8 GiB pin | 1.91M tokens, 12 GiB pin | 4.47M tokens, 26 GiB pin |
-| longest request | 524k tokens | 160k tokens | 524k tokens | 524k tokens |
-| requests decoding at once | 64 | 16 | 64 | 64 |
+| prefill @32k, cold | 2,929 tok/s | 3,847 tok/s | 4,981 tok/s | 4,907 tok/s |
+| prefill @128k, cold | 2,864 tok/s | 3,648 tok/s | 4,822 tok/s | 4,731 tok/s |
+| decode, code / prose / structured | 60.5 / 36.4 / 89.5 tok/s | 79.8 / 45.2 / 119.8 tok/s | 114.6 / 59.5 / 161.6 tok/s | 120.3 / 66.5 / 176.4 tok/s |
+| code, 1 / 2 / 4 / 8 streams, aggregate | 74 / 84 / 117 / 130 tok/s | 89 / 107 / 146 / 173 tok/s | 129 / 150 / 201 / 240 tok/s | 145 / 154 / 219 / 282 tok/s |
+| KV pool (fp8_e4m3) | 1.10M tokens, 8 GiB pin | 1.91M tokens, 12 GiB pin | 4.40M tokens, 26 GiB pin | 4.47M tokens, 26 GiB pin |
+| longest request | 160k tokens | 524k tokens | 524k tokens | 524k tokens |
+| requests decoding at once | 16 | 64 | 64 | 64 |
 | boot, once snapshots exist | ~3 min | ~3 min | ~3 min | not measured |
-| needle recall | 12/12 up to 507k tokens | 6/6 up to 128k tokens | 12/12 up to 507k tokens | 12/12 up to 480k tokens |
+| needle recall | 6/6 up to 128k tokens | 12/12 up to 507k tokens | 12/12 up to 507k tokens | 12/12 up to 480k tokens |
 
-Prefill is first-touch on random words, so nothing is cached. Decode is
-[RigMark](https://github.com/alexellis/rigmark)'s single-stream decode at
-temperature 0, reasoning effort low, with every output gate passing. Streams
-each generate 512 tokens from a different code prompt (`gate/conc_workload.py`).
-The TP=2, 3 and 4 figures come from boots that restored weight snapshots. The
-first boot, which loads the checkpoint and writes them, leaves less memory
-free: at TP=2 its 128k prefill ran 7-15% slower, so restart before measuring.
-TP=6 was measured on other boxes and builds, with GPU clocks locked at
-1989 MHz.
-[experimental/tp3/README.md](experimental/tp3/README.md) has the details.
+Prefill is cold: random words, nothing cached. Decode is
+[RigMark](https://github.com/alexellis/rigmark)'s single-stream test at
+temperature 0 and reasoning effort low, with every output gate passing. Each
+stream generates 512 tokens from its own code prompt (`gate/conc_workload.py`).
 
-TP=4 is the default. For two boxes, put `TP=2` in `compose/.env` on both.
-Each box then holds twice the weights, so the entrypoint picks a smaller KV
-pin, context length, request limit and batch budget. TP=3 and TP=6 need a
-zero-padded copy of the checkpoint, since its head counts do not split by 3.
+We measured TP=2, 3 and 4 on boots that restored weight snapshots. The first
+boot, which loads the checkpoint and writes the snapshots, leaves less memory
+free and runs slower (128k prefill at TP=2 lost 7-15%), so restart once before
+measuring. TP=6 ran on other boxes and builds, with GPU clocks locked at
+1989 MHz. [experimental/tp3/README.md](experimental/tp3/README.md) has the
+details.
+
+TP=4 is the default. For two boxes, set `TP=2` in `compose/.env` on both. Each
+box then holds twice the weights, so the entrypoint shrinks the KV pin, context
+length, request limit and batch budget to fit. TP=3 and TP=6 need a zero-padded
+copy of the checkpoint, because the head counts don't divide by 3.
 [experimental/tp3/README.md](experimental/tp3/README.md) has the steps.
 
-`TP=RING4` is TP=4 on four boxes cabled in a loop instead of through a switch:
-each box's two ConnectX-7 ports go to its two neighbours. mentat places the
-ranks in cable order, and every collective uses only neighbour links, with
-data for the opposite box relayed through a neighbour. It needs mentat 0.17 or
-later on every daemon, since mentat's head places the ranks, and a subnet per
-cable for each PCIe root. So far it has run only on a switch, where decode was
-~1% slower than TP=4 from the relay hop.
+`TP=RING4` runs TP=4 on four boxes cabled in a loop, with no switch: each box's
+two ConnectX-7 ports go to its two neighbours. mentat places the ranks in cable
+order, and every collective uses only neighbour links, relaying traffic for the
+opposite box through a neighbour. It needs mentat 0.17 or later on every daemon
+and a subnet per cable for each PCIe root. We've only run it through a switch,
+where the relay hop cost about 1% of decode.
 [experimental/README.md](experimental/README.md) has the details.
 
 [model.yaml](model.yaml) has the checkpoints and the memory footprint, and
