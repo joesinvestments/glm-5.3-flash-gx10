@@ -258,7 +258,9 @@ export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 # One table, WARN rows first to read, never fatal. PREFLIGHT=0 skips it.
 preflight() {
   local rows=() warns=0 dev nd mtu rate state phys cur max tp kv need avail swap fs free apps
-  row() { rows+=("$1|$2|$3"); [[ "$3" == WARN ]] && warns=$(( warns + 1 )); return 0; }
+  # Fields are split on the unit separator: fix text can hold "|" (echo 3 | sudo tee).
+  local sep=$'\x1f'
+  row() { rows+=("$1$sep$2$sep$3"); [[ "$3" == WARN ]] && warns=$(( warns + 1 )); return 0; }
   local -a devs; IFS=, read -r -a devs <<< "$(sed -E 's/^[=^]+//; s/:[0-9]+//g' <<< "$NCCL_IB_HCA")"
   (( ${#devs[@]} >= 2 )) && row "fabric devices" "${NCCL_IB_HCA}" ok \
     || row "fabric devices" "${NCCL_IB_HCA} (one PCIe root tops out near 110 Gb/s; set FABRIC_SUBNETS to both)" WARN
@@ -357,11 +359,38 @@ PY
       || row "desktop session" "$dm is running (sudo systemctl set-default multi-user.target && sudo systemctl isolate multi-user.target)" WARN
   fi
   grep -q '^search \.$' /etc/resolv.conf 2>/dev/null && row "resolv.conf" "'search .' frozen in; bare hostnames fail (restart the container)" WARN
+  local on; on=$(overlays | tr '\n' ' ')
+  [[ -n $on ]] && row "overlays" "$on" ok || row "overlays" "none: stock kernels" WARN
   echo "preflight ($warns warning$([[ $warns == 1 ]] || echo s)):"
-  printf '%s\n' "${rows[@]}" | awk -F'|' '$3 == "WARN" {printf "  %-5s %-26s %s\n", $3, $1, $2}'
-  printf '%s\n' "${rows[@]}" | awk -F'|' '$3 != "WARN" {printf "  %-5s %-26s %s\n", $3, $1, $2}'
+  printf '%s\n' "${rows[@]}" | awk -F"$sep" '$3 == "WARN" {printf "  %-5s %-26s %s\n", $3, $1, $2}'
+  printf '%s\n' "${rows[@]}" | awk -F"$sep" '$3 != "WARN" {printf "  %-5s %-26s %s\n", $3, $1, $2}'
+}
+
+# The experimental/ overlays this container has mounted, one name per line.
+# Each one mounts a file the image does not ship, except sp, which only sets
+# its environment.
+overlays() {
+  local v=/usr/local/lib/python3.12/dist-packages/vllm
+  [[ -e $v/distributed/device_communicators/arx.py ]] && echo arx
+  [[ -e $v/model_executor/model_loader/weight_snapshot.py ]] && echo snapshot
+  [[ -e $v/v1/core/sched/adaptive_k.py ]] && echo adaptive-k
+  [[ -e $v/model_executor/model_loader/dense_fp8.py ]] && echo fp8
+  [[ -e $v/model_executor/layers/fused_moe/megamoe_vllm.py ]] && echo megamoe
+  [[ -e $v/v1/attention/backends/mla/gb10_sparse_mla.py ]] && echo fixes
+  [[ -n "${VLLM_GLM_SP_TP:-}" ]] && echo sp
+  [[ -e $v/models/glm5next/common/recoverssm.py ]] && echo recoverssm
+  return 0
 }
 [[ "${PREFLIGHT:-1}" == 1 ]] && preflight || true
+
+# Without any overlay the stack runs vLLM's stock kernels at about half the
+# README's decode speed, and nothing else says so. Refuse to start instead.
+if [[ -z "$(overlays)" && "${ALLOW_STOCK:-0}" != 1 ]]; then
+  echo "FATAL: no experimental overlays are mounted, so this would run stock kernels at about half the" \
+       "README's speed. Start the stack with every compose file in README step 5, or set ALLOW_STOCK=1" \
+       "in compose/.env to run stock on purpose." >&2
+  exit 1
+fi
 
 # --- worker memory ---------------------------------------------------------
 # Torch's caching allocator never hands a freed block back to the OS, and on

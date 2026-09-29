@@ -7,6 +7,7 @@ Meaning and rationale stay in the entrypoint and compose comments.
 
 | variable | default |
 |---|---|
+| `ALLOW_STOCK` | _(empty)_ |
 | `API_PORT` | `8002` |
 | `AUTOTUNE_CACHE` | _(empty)_ |
 | `BLOCK_SIZE` | `2304` |
