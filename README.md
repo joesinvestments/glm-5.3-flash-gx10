@@ -34,13 +34,16 @@ has the details.
 | KV pool (fp8_e4m3) | 4.40M tokens, 26 GiB pin | 1.10M tokens, 8 GiB pin | 1.91M tokens, 12 GiB pin | 4.47M tokens, 26 GiB pin |
 | longest request | 524k tokens | 160k tokens | 524k tokens | 524k tokens |
 | requests decoding at once | 64 | 16 | 64 | 64 |
-| boot, once snapshots exist | ~3 min | ~3 min | not measured | not measured |
-| needle recall | 12/12 up to 507k tokens | 6/6 up to 128k tokens | 12/12 up to 480k tokens | 12/12 up to 480k tokens |
+| boot, once snapshots exist | ~3 min | ~3 min | ~3 min | not measured |
+| needle recall | 12/12 up to 507k tokens | 6/6 up to 128k tokens | 12/12 up to 507k tokens | 12/12 up to 480k tokens |
 
 Prefill is first-touch on random words, so nothing is cached. Decode is
 [RigMark](https://github.com/alexellis/rigmark)'s single-stream decode at
 temperature 0, reasoning effort low, with every output gate passing. Streams
 each generate 512 tokens from a different code prompt (`gate/conc_workload.py`).
+The TP=2, 3 and 4 figures come from boots that restored weight snapshots. The
+first boot, which loads the checkpoint and writes them, leaves less memory
+free: at TP=2 its 128k prefill ran 7-15% slower, so restart before measuring.
 TP=6 was measured on other boxes and builds, with GPU clocks locked at
 1989 MHz.
 [experimental/tp3/README.md](experimental/tp3/README.md) has the details.
