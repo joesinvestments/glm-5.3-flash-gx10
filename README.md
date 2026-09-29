@@ -51,9 +51,9 @@ details.
 
 TP=4 is the default. For two boxes, set `TP=2` in `compose/.env` on both. Each
 box then holds twice the weights, so the entrypoint shrinks the KV pin, context
-length, request limit and batch budget to fit. TP=3 and TP=6 need a zero-padded
-copy of the checkpoint, because the head counts don't divide by 3.
-[experimental/tp3/README.md](experimental/tp3/README.md) has the steps.
+length, request limit and batch budget to fit.
+[experimental/tp3/README.md](experimental/tp3/README.md) has the steps for TP=3
+and TP=6.
 
 `TP=RING4` runs TP=4 on four boxes cabled in a loop, with no switch: each box's
 two ConnectX-7 ports go to its two neighbours. mentat places the ranks in cable
