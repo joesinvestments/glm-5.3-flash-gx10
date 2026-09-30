@@ -382,7 +382,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def all_reduce(self, input_):
         arx_comm = self.arx_comm
-        if arx_comm is not None and not arx_comm.disabled and arx_comm.should_use(input_):
+        if arx_comm is not None and not arx_comm.disabled and arx_comm.should_use(input_, two_shot=True):
             return arx_comm.all_reduce(input_)
         fi_ar_comm = self.fi_ar_comm
         use_fi_ar = (
