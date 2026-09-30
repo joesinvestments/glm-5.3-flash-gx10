@@ -105,6 +105,27 @@ class CudaCommunicator(DeviceCommunicatorBase):
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
 
+        # GB10: decode-sized all-reduces too big for arx ran ~30% faster on NCCL's
+        # Simple protocol (134 against 198 us at 16 streams), which costs prefill
+        # 0.5-1.5%. NCCL reads NCCL_PROTO as it sets up a communicator, so a second
+        # communicator with it set serves the decode sizes.
+        self.pynccl_decode: PyNcclCommunicator | None = None
+        decode_proto = os.environ.get("VLLM_NCCL_DECODE_PROTO")
+        if decode_proto and self.pynccl_comm is not None and unique_name.split(":")[0] == "tp":
+            saved = os.environ.get("NCCL_PROTO")
+            os.environ["NCCL_PROTO"] = decode_proto
+            try:
+                self.pynccl_decode = PyNcclCommunicator(
+                    group=self.cpu_group if tcp_store_group is None else tcp_store_group,
+                    device=self.device,
+                )
+            finally:
+                if saved is None:
+                    os.environ.pop("NCCL_PROTO", None)
+                else:
+                    os.environ["NCCL_PROTO"] = saved
+        self.decode_max_bytes = int(os.environ.get("VLLM_NCCL_DECODE_MAX_KB", "4096")) << 10
+
         # GB10: RDMA all-reduce for decode-sized tensors (arx.py).
         self.arx_comm = None
         if (
@@ -448,6 +469,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
             return out
         assert pynccl_comm is not None
+        decode = self.pynccl_decode
+        if (decode is not None and not decode.disabled
+                and input_.numel() * input_.element_size() <= self.decode_max_bytes):
+            out = decode.all_reduce(input_)
+            if out is not None:
+                return out
         out = pynccl_comm.all_reduce(input_)
         if out is None:
             # fall back to the default all-reduce using PyTorch.

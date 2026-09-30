@@ -78,6 +78,7 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `TORCH_MEM_FRACTION` | `0.92` |
 | `TP` | `4` (or `2`, `3`, `RING4`) |
 | `TRITON_CACHE_DIR` | `${CACHE_ROOT}/${SHARED_TAG}/triton` _(derived)_ |
+| `VLLM_NCCL_DECODE_PROTO` | `Simple` (with arx.yaml; empty keeps one NCCL communicator) |
 | `VLLM_ENGINE_READY_TIMEOUT_S` | `3600` |
 | `VLLM_GLM5NEXT_RECOVERSSM` | `0` (1 with recoverssm.yaml) |
 | `VLLM_HOST_IP` | the `lan`-tagged address from mentatd, else its `node_ip` _(derived)_ |

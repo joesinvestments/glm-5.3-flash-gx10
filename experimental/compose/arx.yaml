@@ -13,3 +13,6 @@ services:
       - VLLM_ARXBIG=${VLLM_ARXBIG:-1}
       - VLLM_ARXBIG_RS=${VLLM_ARXBIG_RS:-1}
       - VLLM_ARXBIG_AG=${VLLM_ARXBIG_AG:-0}
+      # Decode all-reduces too big for arx go to a second NCCL communicator on the
+      # Simple protocol (27% faster than LL at 16 streams); prefill keeps LL.
+      - VLLM_NCCL_DECODE_PROTO=${VLLM_NCCL_DECODE_PROTO:-Simple}
