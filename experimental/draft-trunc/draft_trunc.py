@@ -10,9 +10,11 @@ exact.
 
 By default (VLLM_DRAFT_TRUNC_TAU, 0.3 in adaptive-k.yaml) each request keeps
 its leading drafts whose predicted survival, the running product of the
-acceptance estimator's per-draft probabilities, is at least tau. A request
-whose acceptance ran into its cut reports no rejection to the estimator, so
-a draft the cut killed is never graded as rejected. The file named by
+acceptance estimator's per-draft probabilities, is at least tau. A draft the
+cut kills is never graded, so a request whose acceptance ran into its cut
+reports no rejection to the estimator. A position the cut always kills would
+then never be graded again and its prediction could never recover, so every
+VLLM_DRAFT_TRUNC_EXPLORE-th step (8 by default) skips the cut. The file named by
 VLLM_DRAFT_TRUNC_CONTROL overrides that while it exists: "tau X" sets the
 threshold, "live N" keeps each request's first N drafts, and anything else
 truncates nothing.
@@ -38,6 +40,8 @@ _mode: tuple[str, float] | None = None
 # verification is folded into the estimator.
 _kept: torch.Tensor | None = None
 _cut_rows = 0
+_EXPLORE = int(os.environ.get("VLLM_DRAFT_TRUNC_EXPLORE") or 8)
+_tau_steps = 0
 
 
 def _read_control() -> tuple[str, float] | None:
@@ -95,7 +99,7 @@ def mark_dead(is_padding: torch.Tensor, query_start_loc: torch.Tensor, cu_num_lo
               num_reqs: int, max_drafts: int, predictions: torch.Tensor | None = None,
               idx_mapping: torch.Tensor | None = None) -> None:
     """Set is_padding on each request's dead drafts, per the control file."""
-    global _kept, _cut_rows
+    global _kept, _cut_rows, _tau_steps
     _cut_rows = 0
     mode = _read_control()
     if mode is None or num_reqs == 0 or max_drafts == 0:
@@ -105,6 +109,9 @@ def mark_dead(is_padding: torch.Tensor, query_start_loc: torch.Tensor, cu_num_lo
         _mark_dead_kernel[(num_reqs,)](is_padding, query_start_loc, cu_num_logits, int(mode[1]), BLOCK=block)
         return
     if predictions is None or idx_mapping is None:
+        return
+    _tau_steps += 1
+    if _EXPLORE > 0 and _tau_steps % _EXPLORE == 0:
         return
     if _kept is None or _kept.numel() < num_reqs:
         _kept = torch.zeros(max(num_reqs, 256), dtype=torch.int32, device=is_padding.device)
