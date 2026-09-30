@@ -27,10 +27,10 @@ has the details.
 
 | | TP=2 | TP=3 | TP=4 | TP=6 |
 |---|---|---|---|---|
-| prefill @32k, cold | 2,929 tok/s | 3,847 tok/s | 4,981 tok/s | 4,907 tok/s |
-| prefill @128k, cold | 2,864 tok/s | 3,648 tok/s | 4,822 tok/s | 4,731 tok/s |
-| decode, code / prose / structured | 60.5 / 36.4 / 89.5 tok/s | 79.8 / 45.2 / 119.8 tok/s | 114.6 / 59.5 / 161.6 tok/s | 120.3 / 66.5 / 176.4 tok/s |
-| code, 1 / 2 / 4 / 8 streams, aggregate | 74 / 84 / 117 / 130 tok/s | 89 / 107 / 146 / 173 tok/s | 129 / 150 / 201 / 240 tok/s | 145 / 154 / 219 / 282 tok/s |
+| prefill @32k, cold | 2,931 tok/s | 3,864 tok/s | 4,953 tok/s | 4,907 tok/s |
+| prefill @128k, cold | 2,871 tok/s | 3,736 tok/s | 4,795 tok/s | 4,731 tok/s |
+| decode, code / prose / structured | 63.1 / 36.6 / 89.1 tok/s | 80.4 / 45.7 / 120.1 tok/s | 106.0 / 60.8 / 160.3 tok/s | 120.3 / 66.5 / 176.4 tok/s |
+| code, 1 / 2 / 4 / 8 streams, aggregate | 73 / 78 / 108 / 138 tok/s | 92 / 107 / 165 / 184 tok/s | 132 / 141 / 210 / 232 tok/s | 145 / 154 / 219 / 282 tok/s |
 | KV pool (fp8_e4m3) | 1.10M tokens, 8 GiB pin | 1.91M tokens, 12 GiB pin | 4.40M tokens, 26 GiB pin | 4.47M tokens, 26 GiB pin |
 | longest request | 160k tokens | 524k tokens | 524k tokens | 524k tokens |
 | requests decoding at once | 16 | 64 | 64 | 64 |
