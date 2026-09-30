@@ -7,12 +7,17 @@
 # kv_cache_*.py, worker_utils.py, warmup.py: the drafter's KV gets its own
 # small pool, paged 256 tokens at a time, instead of a page in every KV block
 # (VLLM_GLM5NEXT_DRAFT_POOL=1, VLLM_GLM5NEXT_DRAFT_BLOCK_SIZE).
+# tilelang_kernels.py and mhc_tilelang.py: the fused mHC decode kernel reads
+# its projection weights (hc_*_fn, stored bf16 in the checkpoint) as a cached
+# bf16 copy instead of the model's fp32 one, which halves its weight reads and
+# leaves every product unchanged.
 services:
   glm53:
     volumes:
       - ../experimental/fixes/_fa_common.py:/usr/local/lib/python3.12/dist-packages/flashinfer/mla/_batch_mla/_backends/_fa_common.py:ro
       - ../experimental/fixes/attention.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/common/attention.py:ro
       - ../experimental/fixes/tilelang_kernels.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/mhc/tilelang_kernels.py:ro
+      - ../experimental/fixes/mhc_tilelang.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/mhc/tilelang.py:ro
       - ../experimental/fixes/flashinfer_mla_sparse_sm90.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py:ro
       - ../experimental/fixes/gb10_sparse_mla.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/gb10_sparse_mla.py:ro
       - ../experimental/fixes/gdn_attn.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/gdn_attn.py:ro

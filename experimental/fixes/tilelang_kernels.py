@@ -694,7 +694,7 @@ def mhc_fused_tilelang(
     residual_in: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
     post_mix: T.Tensor((m, hc), T.float32)  # type: ignore[no-redef, valid-type]
     x_in: T.Tensor((m, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    weight_t: T.Tensor((n_out, hc, h), T.float32)  # type: ignore[no-redef, valid-type]
+    weight_t: T.Tensor((n_out, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
     yp_out: T.Tensor((split_k, m, n_out), T.float32)  # type: ignore[no-redef, valid-type]
     rp_out: T.Tensor((split_k, m), T.float32)  # type: ignore[no-redef, valid-type]
     residual_out: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
@@ -752,7 +752,7 @@ def mhc_fused_tilelang(
             # Per-thread FMA into acc[n]
             for n in T.unroll(tile_n):
                 for j in T.unroll(hc):
-                    acc[n] += weight_t[i_nt * tile_n + n, j, h_idx] * new_r[j]
+                    acc[n] += T.cast(weight_t[i_nt * tile_n + n, j, h_idx], T.float32) * new_r[j]
 
         for n in T.unroll(tile_n):
             acc[n] = T.warp_reduce_sum(acc[n])
@@ -1719,7 +1719,7 @@ class MhcFusedTileLangKernel(
         post_mix = make_tilelang_warmup_tensor(torch.float32, num_tokens, hc_mult)
         x_in = make_tilelang_warmup_tensor(torch.bfloat16, num_tokens, hidden_size)
         weight_t = make_tilelang_warmup_tensor(
-            torch.float32, hc_mult3, hc_mult, hidden_size
+            torch.bfloat16, hc_mult3, hc_mult, hidden_size
         )
         return dict(
             comb_mix=comb_mix,
