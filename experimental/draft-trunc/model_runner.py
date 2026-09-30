@@ -2113,10 +2113,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
-            if isinstance(self.speculator, DraftModelSpeculator):
+            if isinstance(self.speculator, DraftModelSpeculator) and draft_trunc.graded():
                 self.speculator.observe_verification(
-                    input_batch.idx_mapping, num_sampled,
-                    draft_trunc.rejected_for_estimator(num_sampled, num_rejected) if draft_trunc.ENABLED else num_rejected,
+                    input_batch.idx_mapping, num_sampled, num_rejected
                 )
             if draft_trunc.LOG:
                 draft_trunc.log_step(

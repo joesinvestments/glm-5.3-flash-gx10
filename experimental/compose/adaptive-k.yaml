@@ -19,7 +19,7 @@ services:
       - EXTRA_ARGS=--scheduler-cls vllm.v1.core.sched.adaptive_k.AdaptiveKScheduler --speculative-config {"method":"dflash","model":"/models/glm-5.3-flash-dflash2","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","num_speculative_tokens_per_batch_size":[[1,1,7],[2,2,5],[3,3,4],[4,4,3],[5,5,2],[6,32,7]]}
       - VLLM_ADAPTIVE_K_CONTROL=/root/.cache/adaptive-k
       - VLLM_DRAFT_TRUNC_TAU=${VLLM_DRAFT_TRUNC_TAU:-0.3}
-      - VLLM_DRAFT_TRUNC_EXPLORE=${VLLM_DRAFT_TRUNC_EXPLORE:-8}
+      - VLLM_DRAFT_TRUNC_EXPLORE=${VLLM_DRAFT_TRUNC_EXPLORE:-4}
       - VLLM_DRAFT_TRUNC_CONTROL=/root/.cache/draft-trunc
       - VLLM_DRAFT_TRUNC_LOG=${VLLM_DRAFT_TRUNC_LOG:-}
       - VLLM_ADAPTIVE_K_PER_REQUEST=${VLLM_ADAPTIVE_K_PER_REQUEST:-0}

@@ -10,11 +10,11 @@ exact.
 
 By default (VLLM_DRAFT_TRUNC_TAU, 0.3 in adaptive-k.yaml) each request keeps
 its leading drafts whose predicted survival, the running product of the
-acceptance estimator's per-draft probabilities, is at least tau. A draft the
-cut kills is never graded, so a request whose acceptance ran into its cut
-reports no rejection to the estimator. A position the cut always kills would
-then never be graded again and its prediction could never recover, so every
-VLLM_DRAFT_TRUNC_EXPLORE-th step (8 by default) skips the cut. The file named by
+acceptance estimator's per-draft probabilities, is at least tau. A cut step
+grades only the drafts the estimator already expected to survive, so fitting
+on it would bias the estimator, and a position it always kills could never
+recover. Every VLLM_DRAFT_TRUNC_EXPLORE-th step (4 by default) therefore skips
+the cut, and only those steps are folded into the estimator. The file named by
 VLLM_DRAFT_TRUNC_CONTROL overrides that while it exists: "tau X" sets the
 threshold, "live N" keeps each request's first N drafts, and anything else
 truncates nothing.
@@ -36,12 +36,9 @@ _logged = 0
 _control = os.environ.get("VLLM_DRAFT_TRUNC_CONTROL", "")
 _mtime = 0.0
 _mode: tuple[str, float] | None = None
-# Per batch row, the drafts the last tau cut kept; read when the step's
-# verification is folded into the estimator.
-_kept: torch.Tensor | None = None
-_cut_rows = 0
-_EXPLORE = int(os.environ.get("VLLM_DRAFT_TRUNC_EXPLORE") or 8)
-_tau_steps = 0
+_EXPLORE = int(os.environ.get("VLLM_DRAFT_TRUNC_EXPLORE") or 4)
+_steps = 0
+_cut = False
 
 
 def _read_control() -> tuple[str, float] | None:
@@ -81,7 +78,7 @@ def _mark_dead_kernel(is_padding_ptr, query_start_loc_ptr, cu_num_logits_ptr, li
 
 @triton.jit
 def _mark_cut_kernel(is_padding_ptr, query_start_loc_ptr, cu_num_logits_ptr, pred_ptr, pred_stride,
-                     idx_mapping_ptr, kept_ptr, tau, BLOCK: tl.constexpr):
+                     idx_mapping_ptr, tau, BLOCK: tl.constexpr):
     b = tl.program_id(0)
     num_drafts = tl.load(cu_num_logits_ptr + b + 1) - tl.load(cu_num_logits_ptr + b) - 1
     end = tl.load(query_start_loc_ptr + b + 1)
@@ -92,41 +89,35 @@ def _mark_cut_kernel(is_padding_ptr, query_start_loc_ptr, cu_num_logits_ptr, pre
     # Survival only falls along a request, so the dead drafts are a suffix.
     dead = (tl.cumprod(p, axis=0) < tau) & in_range
     tl.store(is_padding_ptr + end - num_drafts + j, tl.full((BLOCK,), 1, tl.int1), mask=dead)
-    tl.store(kept_ptr + b, num_drafts - tl.sum(dead.to(tl.int32), axis=0))
 
 
 def mark_dead(is_padding: torch.Tensor, query_start_loc: torch.Tensor, cu_num_logits: torch.Tensor,
               num_reqs: int, max_drafts: int, predictions: torch.Tensor | None = None,
               idx_mapping: torch.Tensor | None = None) -> None:
     """Set is_padding on each request's dead drafts, per the control file."""
-    global _kept, _cut_rows, _tau_steps
-    _cut_rows = 0
+    global _steps, _cut
+    _cut = False
     mode = _read_control()
     if mode is None or num_reqs == 0 or max_drafts == 0:
         return
     block = triton.next_power_of_2(max_drafts)
     if mode[0] == "live":
         _mark_dead_kernel[(num_reqs,)](is_padding, query_start_loc, cu_num_logits, int(mode[1]), BLOCK=block)
+        _cut = True
         return
     if predictions is None or idx_mapping is None:
         return
-    _tau_steps += 1
-    if _EXPLORE > 0 and _tau_steps % _EXPLORE == 0:
+    _steps += 1
+    if _EXPLORE > 0 and _steps % _EXPLORE == 0:
         return
-    if _kept is None or _kept.numel() < num_reqs:
-        _kept = torch.zeros(max(num_reqs, 256), dtype=torch.int32, device=is_padding.device)
     _mark_cut_kernel[(num_reqs,)](is_padding, query_start_loc, cu_num_logits, predictions, predictions.stride(0),
-                                  idx_mapping, _kept, mode[1], BLOCK=block)
-    _cut_rows = num_reqs
+                                  idx_mapping, mode[1], BLOCK=block)
+    _cut = True
 
 
-def rejected_for_estimator(num_sampled: torch.Tensor, num_rejected: torch.Tensor) -> torch.Tensor:
-    """num_rejected with 0 for requests whose acceptance ran into the tau cut."""
-    n = num_sampled.shape[0]
-    if _cut_rows == 0 or _cut_rows != n:
-        return num_rejected
-    hit_cut = (num_sampled - 1) >= _kept[:n].to(num_sampled.dtype)
-    return torch.where(hit_cut, torch.zeros_like(num_rejected), num_rejected)
+def graded() -> bool:
+    """Whether the last step verified every draft, so the estimator may learn from it."""
+    return not _cut
 
 
 def log_step(confidence: torch.Tensor, cu_num_logits: torch.Tensor, num_sampled: torch.Tensor,

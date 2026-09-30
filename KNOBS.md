@@ -78,7 +78,7 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `TORCH_MEM_FRACTION` | `0.92` |
 | `TP` | `4` (or `2`, `3`, `RING4`) |
 | `TRITON_CACHE_DIR` | `${CACHE_ROOT}/${SHARED_TAG}/triton` _(derived)_ |
-| `VLLM_DRAFT_TRUNC_EXPLORE` | `8` (with adaptive-k.yaml; every Nth step skips the draft cut so the estimator keeps grading every position) |
+| `VLLM_DRAFT_TRUNC_EXPLORE` | `4` (with adaptive-k.yaml; every Nth step skips the draft cut, and only those steps train the estimator) |
 | `VLLM_DRAFT_TRUNC_TAU` | `0.3` (with adaptive-k.yaml; `0` turns the draft cut off) |
 | `VLLM_ENGINE_READY_TIMEOUT_S` | `3600` |
 | `VLLM_GLM5NEXT_RECOVERSSM` | `0` (1 with recoverssm.yaml) |
