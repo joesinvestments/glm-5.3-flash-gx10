@@ -147,6 +147,11 @@ Boot goes from about 8 minutes to about 3.5 once snapshots exist.
   instead of 3, and 8 streams decode 44% faster. At TP=4, 61 run at 64
   streams instead of 49 (+28% aggregate).
 - **fixes** (`fixes/`): things found by profiling.
+  - The fused mHC post + pre-norm decode kernel read its projection weights
+    in fp32, 1.5 MB a call, though the checkpoint stores them in bf16. It
+    now reads a cached bf16 copy (mhc_tilelang.py, tilelang_kernels.py):
+    8.2 us a call instead of 11.9, ~1% faster decode at one stream, and
+    greedy logprobs identical to the fp32 path.
   - FlashInfer's MLA planner cloned a 136 MB metadata buffer on every step,
     only to roll it back on error.
   - The GLM indexer's head gate ran a fp32 GEMM that took 69 us per layer.

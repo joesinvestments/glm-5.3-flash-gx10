@@ -131,22 +131,29 @@ class ArxCommunicator:
         _taken = True
         self.ext = ext
         self.max_bytes = min(int(os.environ.get("VLLM_ARX_MAX_BYTES", 256 << 10)), ext.max_bytes())
+        # Two-shot (reduce-scatter + all-gather) for all-reduces above max_bytes,
+        # up to this size: 2-2.7x faster than NCCL from 512 KB. Mesh only; 0 is off.
+        self.two_shot_max = min(int(os.environ.get("VLLM_ARX_TWO_SHOT_MAX_KB", "0")) << 10, ext.max_bytes2())
+        self.world = world
         self.disabled = False
-        logger.info("arx all-reduce: rank %d/%d%s on %s, gids %s, up to %d bytes", rank, world,
-                    " ring (prev, next)" if ring else "", devs, gids, self.max_bytes)
+        logger.info("arx all-reduce: rank %d/%d%s on %s, gids %s, up to %d bytes%s", rank, world,
+                    " ring (prev, next)" if ring else "", devs, gids, self.max_bytes,
+                    f", two-shot up to {self.two_shot_max} bytes" if self.two_shot_max else "")
 
-    def should_use(self, t: torch.Tensor) -> bool:
-        return (
-            t.dtype == torch.bfloat16
-            and t.is_cuda
-            and t.is_contiguous()
-            and t.numel() % 8 == 0
-            and t.numel() * 2 <= self.max_bytes
-        )
+    def should_use(self, t: torch.Tensor, two_shot: bool = False) -> bool:
+        """Whether arx takes t: up to max_bytes, or up to two_shot_max when the caller allows it."""
+        if not (t.dtype == torch.bfloat16 and t.is_cuda and t.is_contiguous() and t.numel() % 8 == 0):
+            return False
+        nbytes = t.numel() * 2
+        return nbytes <= self.max_bytes or (
+            two_shot and nbytes <= self.two_shot_max and t.numel() % (8 * self.world) == 0)
 
     def all_reduce(self, t: torch.Tensor) -> torch.Tensor:
         global _prefetch
         out = torch.empty_like(t)
+        if t.numel() * 2 > self.max_bytes:
+            self.ext.allreduce2(t, out)
+            return out
         pf, _prefetch = _prefetch, ()
         self.ext.allreduce(t, out, [p for p, _ in pf], [b for _, b in pf])
         return out

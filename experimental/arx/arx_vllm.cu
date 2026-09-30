@@ -35,6 +35,15 @@
 // takes the partial's size from this rank's own publish of the same seq. The
 // same chain keeps this rank from publishing seq + 2 before the relay.
 //
+// Two-shot (mesh only), for partials too big to send whole to every peer:
+// allreduce2() runs two collectives in a row, each its own seq. Reduce-scatter:
+// the proxy writes chunk j of this rank's partial into rank j's recv slot, and
+// the GPU sums its own chunk from every rank (fp32, rank order, one rounding,
+// so the bits match the one-shot sum). All-gather: the proxy writes the summed
+// chunk into every peer's slot, and the GPU assembles the chunks in rank order.
+// Each rank sends 2 (world - 1) / world partials' worth instead of world - 1.
+// Ctl::mode tells the proxy which pattern a seq uses.
+//
 // vLLM form: prepare() returns this rank's connection details, the caller
 // all-gathers them over its own group, connect() wires the QPs and starts the
 // proxy, then allreduce(in, out) runs on the current stream and is
@@ -66,11 +75,15 @@
 
 constexpr int kMaxWorld = 8;
 constexpr int kMaxDev = 4;  // ring mode: 2 ports x 2 roots
-constexpr size_t kMaxBytes = 512 << 10;  // one partial: bf16 [32, 4096] is 256 KB
+constexpr size_t kMaxBytes = 512 << 10;  // one-shot partial: bf16 [32, 4096] is 256 KB
+constexpr size_t kSendBytes = 4 << 20;   // per parity: a two-shot partial
+constexpr size_t kSlotBytes = 1 << 20;   // per peer per parity: a one-shot partial or a two-shot chunk
+enum : uint64_t { kFull = 0, kScatter = 1, kGather = 2 };
 
 struct Ctl {                   // pinned; written by the GPU, read by the proxy
   volatile uint64_t seq;       // last published partial
   volatile uint64_t bytes[2];  // size of the partial in send[parity]
+  volatile uint64_t mode[2];   // kFull, kScatter or kGather for send[parity]
   volatile uint64_t stop;
   volatile uint64_t done;      // last seq the GPU finished summing (for the watchdog)
 };
@@ -99,8 +112,8 @@ __device__ __forceinline__ uint4 ld_cv(const void* p) {  // bypass caches: the N
 
 
 struct Dev {
-  __nv_bfloat16* send;           // [2][kMaxBytes / 2]
-  const __nv_bfloat16* recv;     // [2][world][kMaxBytes / 2]
+  __nv_bfloat16* send;           // [2][kSendBytes / 2]
+  const __nv_bfloat16* recv;     // [2][world][kSlotBytes / 2]
   const volatile uint64_t* flag; // [2 * world]
   Ctl* ctl;
   unsigned* seq_dev;             // device: last completed seq
@@ -121,7 +134,7 @@ struct Prefetch {
 __global__ void arx_kernel(Dev d, const __nv_bfloat16* __restrict__ in, __nv_bfloat16* out, int n, Prefetch pf) {
   const uint64_t seq = *d.seq_dev + 1;
   const int par = seq & 1;
-  __nv_bfloat16* mine = d.send + (size_t)par * (kMaxBytes / 2);
+  __nv_bfloat16* mine = d.send + (size_t)par * (kSendBytes / 2);
   const int stride = gridDim.x * blockDim.x * 8;
   for (int i = (blockIdx.x * blockDim.x + threadIdx.x) * 8; i < n; i += stride)
     *reinterpret_cast<uint4*>(mine + i) = *reinterpret_cast<const uint4*>(in + i);
@@ -132,6 +145,7 @@ __global__ void arx_kernel(Dev d, const __nv_bfloat16* __restrict__ in, __nv_bfl
   // publish would be skipped or would go out before every block copied.
   if (threadIdx.x == 0 && atomicAdd(&d.blocks[0], 1) == gridDim.x - 1) {  // last block publishes
     d.blocks[0] = 0;
+    d.ctl->mode[par] = kFull;
     d.ctl->bytes[par] = (uint64_t)n * 2;
     __threadfence_system();
     d.ctl->seq = seq;
@@ -169,7 +183,7 @@ __global__ void arx_kernel(Dev d, const __nv_bfloat16* __restrict__ in, __nv_bfl
     for (int src = 0; src < kMaxWorld; ++src)
       if (src < d.world)
         v[src] = src == d.rank ? *reinterpret_cast<const uint4*>(mine + i)
-                               : ld_cv(d.recv + ((size_t)par * d.world + src) * (kMaxBytes / 2) + i);
+                               : ld_cv(d.recv + ((size_t)par * d.world + src) * (kSlotBytes / 2) + i);
     float acc[8] = {};
 #pragma unroll
     for (int src = 0; src < kMaxWorld; ++src)  // rank order: every rank gets the same bits
@@ -189,6 +203,94 @@ __global__ void arx_kernel(Dev d, const __nv_bfloat16* __restrict__ in, __nv_bfl
     *d.seq_dev = (unsigned)seq;
     d.ctl->done = seq;
   }
+}
+
+// The two-shot kernels: copy n bf16 into send[par], publish them as `mode`,
+// wait for every peer's flag, then leave the rest to the caller.
+__device__ __forceinline__ uint64_t publish_and_wait(Dev d, const __nv_bfloat16* __restrict__ in, int n,
+                                                     uint64_t mode) {
+  const uint64_t seq = *d.seq_dev + 1;
+  const int par = seq & 1;
+  __nv_bfloat16* mine = d.send + (size_t)par * (kSendBytes / 2);
+  const int stride = gridDim.x * blockDim.x * 8;
+  for (int i = (blockIdx.x * blockDim.x + threadIdx.x) * 8; i < n; i += stride)
+    *reinterpret_cast<uint4*>(mine + i) = *reinterpret_cast<const uint4*>(in + i);
+  __threadfence_system();
+  __syncthreads();
+  if (threadIdx.x == 0 && atomicAdd(&d.blocks[0], 1) == gridDim.x - 1) {
+    d.blocks[0] = 0;
+    d.ctl->mode[par] = mode;
+    d.ctl->bytes[par] = (uint64_t)n * 2;
+    __threadfence_system();
+    d.ctl->seq = seq;
+  }
+  if (blockIdx.x == 0) {
+    if (threadIdx.x < 2 * d.world && threadIdx.x / 2 != d.rank)
+      while (ld_acquire_sys(d.flag + threadIdx.x) < seq) {}
+    __syncthreads();
+    if (threadIdx.x == 0) { __threadfence(); atomicExch(d.go, (unsigned)seq); }
+  } else {
+    if (threadIdx.x == 0)
+      while (true) {
+        unsigned g;
+        asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(g) : "l"(d.go) : "memory");
+        if (g >= (unsigned)seq) break;
+      }
+    __syncthreads();
+  }
+  return seq;
+}
+
+__device__ __forceinline__ void finish(Dev d, uint64_t seq) {
+  __syncthreads();
+  if (threadIdx.x == 0 && atomicAdd(&d.blocks[1], 1) == gridDim.x - 1) {
+    d.blocks[1] = 0;
+    *d.seq_dev = (unsigned)seq;
+    d.ctl->done = seq;
+  }
+}
+
+// out[chunk] = this rank's chunk of the sum of every rank's in[n].
+__global__ void arx_scatter_kernel(Dev d, const __nv_bfloat16* __restrict__ in, __nv_bfloat16* out, int n) {
+  const uint64_t seq = publish_and_wait(d, in, n, kScatter);
+  const int par = seq & 1, chunk = n / d.world;
+  const __nv_bfloat16* mine = d.send + (size_t)par * (kSendBytes / 2) + (size_t)d.rank * chunk;
+  const int stride = gridDim.x * blockDim.x * 8;
+  for (int i = (blockIdx.x * blockDim.x + threadIdx.x) * 8; i < chunk; i += stride) {
+    uint4 v[kMaxWorld];
+#pragma unroll
+    for (int src = 0; src < kMaxWorld; ++src)
+      if (src < d.world)
+        v[src] = src == d.rank ? *reinterpret_cast<const uint4*>(mine + i)
+                               : ld_cv(d.recv + ((size_t)par * d.world + src) * (kSlotBytes / 2) + i);
+    float acc[8] = {};
+#pragma unroll
+    for (int src = 0; src < kMaxWorld; ++src)  // rank order, as the one-shot sum
+      if (src < d.world) {
+        const __nv_bfloat16* b = reinterpret_cast<const __nv_bfloat16*>(&v[src]);
+#pragma unroll
+        for (int k = 0; k < 8; ++k) acc[k] += __bfloat162float(b[k]);
+      }
+    __align__(16) __nv_bfloat16 o[8];
+#pragma unroll
+    for (int k = 0; k < 8; ++k) o[k] = __float2bfloat16(acc[k]);
+    *reinterpret_cast<uint4*>(out + i) = *reinterpret_cast<const uint4*>(o);
+  }
+  finish(d, seq);
+}
+
+// out[world * chunk] = every rank's chunk, in rank order.
+__global__ void arx_gather_kernel(Dev d, const __nv_bfloat16* __restrict__ chunk_in, __nv_bfloat16* out, int chunk) {
+  const uint64_t seq = publish_and_wait(d, chunk_in, chunk, kGather);
+  const int par = seq & 1, n = chunk * d.world;
+  const int stride = gridDim.x * blockDim.x * 8;
+  for (int i = (blockIdx.x * blockDim.x + threadIdx.x) * 8; i < n; i += stride) {
+    const int src = i / chunk, j = i - src * chunk;
+    *reinterpret_cast<uint4*>(out + i) =
+        src == d.rank ? *reinterpret_cast<const uint4*>(chunk_in + j)
+                      : ld_cv(d.recv + ((size_t)par * d.world + src) * (kSlotBytes / 2) + j);
+  }
+  finish(d, seq);
 }
 
 // ---- host side ---------------------------------------------------------------
@@ -266,7 +368,7 @@ void proxy_loop() {
         const int par = s & 1;
         const uint32_t bytes = (uint32_t)own_bytes[par], half = (bytes / 2 + 15) & ~15u;
         const uint32_t off = r ? half : 0, len = r ? bytes - half : half;
-        const uint64_t at = ((uint64_t)par * world + S.prev) * kMaxBytes + off;
+        const uint64_t at = ((uint64_t)par * world + S.prev) * kSlotBytes + off;
         if (!post(1, r, (uint64_t)(S.recv_h + at), S.recv_mr[chan_dev(1, r)]->lkey, len, at, S.prev * 2 + r, s,
                   posted[1][r])) {
           g_proxy_err = true;
@@ -304,17 +406,21 @@ void proxy_loop() {
     ++seq;  // every seq, in order
     std::atomic_thread_fence(std::memory_order_acquire);
     const int par = seq & 1;
-    const uint32_t bytes = (uint32_t)S.ctl->bytes[par];
+    const uint64_t mode = S.ctl->mode[par];
+    const uint32_t total = (uint32_t)S.ctl->bytes[par];
+    // A scatter sends each peer its own chunk; full and gather send everything.
+    const uint32_t bytes = mode == kScatter ? total / world : total;
     const uint32_t half = (bytes / 2 + 15) & ~15u;  // root 0 takes the first half
     own_bytes[par] = bytes;
     // Mesh: channel j is rank j. Ring: next, then prev unless prev is next.
     const int nchan = S.ring ? (world == 2 ? 1 : 2) : world - 1;
     for (int step = 1; step <= nchan; ++step) {
       const int c = S.ring ? 2 - step : (rank + step) % world;
+      const uint64_t base = mode == kScatter ? (uint64_t)chan_peer(c) * bytes : 0;
       for (int r = 0; r < 2; ++r) {
         const uint32_t off = r ? half : 0, len = r ? bytes - half : half;
-        if (!post(c, r, (uint64_t)(S.send_h + par * kMaxBytes + off), S.send_mr[chan_dev(c, r)]->lkey, len,
-                  ((uint64_t)par * world + rank) * kMaxBytes + off, rank * 2 + r, seq, posted[c][r])) {
+        if (!post(c, r, (uint64_t)(S.send_h + par * kSendBytes + base + off), S.send_mr[chan_dev(c, r)]->lkey, len,
+                  ((uint64_t)par * world + rank) * kSlotBytes + off, rank * 2 + r, seq, posted[c][r])) {
           g_proxy_err = true;
           return;
         }
@@ -347,8 +453,8 @@ py::bytes arx_prepare(int64_t rank, int64_t world, std::vector<std::string> devs
   TORCH_CHECK((int)devs.size() == S.ndev && (int)gids.size() == S.ndev, "arx: expected ", S.ndev, " devices");
   S.rank = rank; S.world = world; S.ring = ring;
   S.prev = (rank + world - 1) % world; S.next = (rank + 1) % world;
-  CK(cudaHostAlloc(&S.send_h, 2 * kMaxBytes, cudaHostAllocMapped));
-  CK(cudaHostAlloc(&S.recv_h, 2 * world * kMaxBytes, cudaHostAllocMapped));
+  CK(cudaHostAlloc(&S.send_h, 2 * kSendBytes, cudaHostAllocMapped));
+  CK(cudaHostAlloc(&S.recv_h, 2 * world * kSlotBytes, cudaHostAllocMapped));
   CK(cudaHostAlloc(&S.flag_h, 2 * kMaxWorld * sizeof(uint64_t), cudaHostAllocMapped));
   CK(cudaHostAlloc(&S.ctl, sizeof(Ctl), cudaHostAllocMapped));
   memset(S.flag_h, 0, 2 * kMaxWorld * sizeof(uint64_t));
@@ -362,8 +468,8 @@ py::bytes arx_prepare(int64_t rank, int64_t world, std::vector<std::string> devs
       if (devs[d] == ibv_get_device_name(list[i])) S.ctx[d] = ibv_open_device(list[i]);
     TORCH_CHECK(S.ctx[d], "arx: no RDMA device ", devs[d]);
     S.pd[d] = ibv_alloc_pd(S.ctx[d]); IBCK(S.pd[d]);
-    S.send_mr[d] = ibv_reg_mr(S.pd[d], S.send_h, 2 * kMaxBytes, acc); IBCK(S.send_mr[d]);
-    S.recv_mr[d] = ibv_reg_mr(S.pd[d], S.recv_h, 2 * world * kMaxBytes, acc); IBCK(S.recv_mr[d]);
+    S.send_mr[d] = ibv_reg_mr(S.pd[d], S.send_h, 2 * kSendBytes, acc); IBCK(S.send_mr[d]);
+    S.recv_mr[d] = ibv_reg_mr(S.pd[d], S.recv_h, 2 * world * kSlotBytes, acc); IBCK(S.recv_mr[d]);
     S.flag_mr[d] = ibv_reg_mr(S.pd[d], S.flag_h, 2 * kMaxWorld * sizeof(uint64_t), acc); IBCK(S.flag_mr[d]);
     S.cq[d] = ibv_create_cq(S.ctx[d], 4096, nullptr, nullptr, 0); IBCK(S.cq[d]);
     ibv_gid gid;
@@ -456,9 +562,32 @@ void arx_allreduce(torch::Tensor in, torch::Tensor out, std::vector<int64_t> pf_
 
 int64_t arx_max_bytes() { return kMaxBytes; }
 
+// Two-shot all-reduce (mesh only): a reduce-scatter then an all-gather. n must
+// split into world chunks of whole 16-byte vectors.
+void arx_allreduce2(torch::Tensor in, torch::Tensor out) {
+  TORCH_CHECK(S.connected, "arx is not connected");
+  TORCH_CHECK(!g_proxy_err, "arx proxy failed");
+  TORCH_CHECK(!S.ring, "arx two-shot is mesh only");
+  TORCH_CHECK(in.scalar_type() == at::kBFloat16 && out.scalar_type() == at::kBFloat16 && in.is_contiguous() &&
+              out.is_contiguous() && in.numel() == out.numel());
+  const int n = in.numel(), chunk = n / S.world;
+  TORCH_CHECK(n % (8 * S.world) == 0 && (size_t)n * 2 <= kSendBytes && (size_t)chunk * 2 <= kSlotBytes);
+  auto mid = torch::empty({chunk}, in.options());
+  const int threads = 256;
+  auto stream = at::cuda::getCurrentCUDAStream();
+  arx_scatter_kernel<<<std::max(1, std::min(8, chunk / (threads * 8))), threads, 0, stream>>>(
+      S.dev, (const __nv_bfloat16*)in.data_ptr(), (__nv_bfloat16*)mid.data_ptr(), n);
+  arx_gather_kernel<<<std::max(1, std::min(8, n / (threads * 8))), threads, 0, stream>>>(
+      S.dev, (const __nv_bfloat16*)mid.data_ptr(), (__nv_bfloat16*)out.data_ptr(), chunk);
+}
+
+int64_t arx_max_bytes2() { return S.ring ? 0 : (int64_t)std::min(kSendBytes, kSlotBytes * S.world); }
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("prepare", &arx_prepare);
   m.def("connect", &arx_connect);
   m.def("allreduce", &arx_allreduce);
   m.def("max_bytes", &arx_max_bytes);
+  m.def("allreduce2", &arx_allreduce2);
+  m.def("max_bytes2", &arx_max_bytes2);
 }
