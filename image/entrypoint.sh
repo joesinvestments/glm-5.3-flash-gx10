@@ -387,7 +387,7 @@ overlays() {
 # README's decode speed, and nothing else says so. Refuse to start instead.
 if [[ -z "$(overlays)" && "${ALLOW_STOCK:-0}" != 1 ]]; then
   echo "FATAL: no experimental overlays are mounted, so this would run stock kernels at about half the" \
-       "README's speed. Start the stack with every compose file in README step 5, or set ALLOW_STOCK=1" \
+       "README's speed. Start the stack with ./glm53 up -d (README step 5), or set ALLOW_STOCK=1" \
        "in compose/.env to run stock on purpose." >&2
   exit 1
 fi

@@ -248,19 +248,18 @@ announcements (`MENTAT_SECRET`, which must then be set on every box).
 
 ## 5. Start the model
 
-On every box, with every overlay from `experimental/` (later files win, so keep
-the order):
+On every box:
 
-    docker compose -f compose/glm53.yaml \
-      -f experimental/compose/arx.yaml -f experimental/compose/snapshot.yaml \
-      -f experimental/compose/adaptive-k.yaml -f experimental/compose/fp8.yaml \
-      -f experimental/compose/megamoe.yaml -f experimental/compose/fixes.yaml \
-      -f experimental/compose/sp.yaml -f experimental/compose/recoverssm.yaml up -d
+    ./glm53 up -d
 
-The numbers at the top need all of them. Started with `compose/glm53.yaml`
-alone, the stack runs vLLM's stock kernels at about half the speed, so the
-entrypoint refuses to start that way unless `compose/.env` sets `ALLOW_STOCK=1`.
-Use the same list of files for every later `up`.
+`glm53` runs `docker compose` with `compose/glm53.yaml` and every overlay in
+`experimental/compose`, in the order the numbers at the top were measured with
+(later files win). It passes the rest of its arguments to `docker compose`, so
+`./glm53 down`, `./glm53 logs -f` and `./glm53 ps` work too, and
+`./glm53 -f my.yaml up -d` adds your own files after the overlays. Started with
+`compose/glm53.yaml` alone (`./glm53 --stock`), the stack runs vLLM's stock
+kernels at about half the speed, so the entrypoint refuses to start that way
+unless `compose/.env` sets `ALLOW_STOCK=1`.
 
 From cold, the boxes may start in any order: registration retries until the
 daemon answers, and the head waits for all four GPUs before it loads. The
@@ -276,7 +275,7 @@ cycles. Take every rank down, confirm all four containers are gone, then start
 them again a few seconds later:
 
     # on each box
-    docker compose -f compose/glm53.yaml down --timeout 60
+    ./glm53 down --timeout 60
     # confirm on all four: docker ps -a | grep glm53  ->  nothing
     # then up again; with fixed roles, the head first
 
@@ -409,7 +408,7 @@ sm_121a into a directory on every box and add an override file:
           - PYTHONPATH=/opt/ext
           - VLLM_GLM53_CUDA_SPARSE_MLA=1
 
-    docker compose -f compose/glm53.yaml <the overlay files from step 5> -f compose/ext.yaml up -d
+    ./glm53 -f compose/ext.yaml up -d
 
 `VLLM_GLM53_CUDA_SPARSE_MLA` without the plugin drops the working SM90 path
 and leaves the one that fails on this checkpoint. Leave the plugin's

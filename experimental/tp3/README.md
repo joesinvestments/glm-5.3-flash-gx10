@@ -54,12 +54,7 @@ fabric), on three boxes.
    restates adaptive-k.yaml's `EXTRA_ARGS` and adds a data-parallel vision
    tower, whose 16 heads do not split by 3):
 
-       docker compose -f compose/glm53.yaml \
-         -f experimental/compose/arx.yaml -f experimental/compose/snapshot.yaml \
-         -f experimental/compose/adaptive-k.yaml -f experimental/compose/fp8.yaml \
-         -f experimental/compose/megamoe.yaml -f experimental/compose/fixes.yaml \
-         -f experimental/compose/sp.yaml -f experimental/compose/recoverssm.yaml \
-         -f experimental/compose/tp3.yaml up -d
+       ./glm53 -f experimental/compose/tp3.yaml up -d
 
    The first boot pads while it
    loads and writes a weight snapshot under its own tag (`tp3pad-...`, set in

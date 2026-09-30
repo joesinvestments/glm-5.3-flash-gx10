@@ -1,0 +1,27 @@
+#!/bin/bash
+# docker compose with the model and every overlay in experimental/compose, in
+# the order the README's numbers were measured with (later files win).
+#
+#   ./glm53 up -d                       start
+#   ./glm53 down --timeout 60           stop
+#   ./glm53 logs -f | ps | config       anything else docker compose takes
+#   ./glm53 -f compose/ext.yaml up -d   your own files, after the overlays
+#   ./glm53 --stock up -d               compose/glm53.yaml alone (stock kernels;
+#                                       the entrypoint also wants ALLOW_STOCK=1)
+set -e
+cd "$(dirname "$0")"
+overlays=(arx snapshot adaptive-k fp8 megamoe fixes sp recoverssm)
+files=(-f compose/glm53.yaml)
+extra=()
+stock=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --stock) stock=1; shift ;;
+    -f) extra+=(-f "$2"); shift 2 ;;
+    *) break ;;
+  esac
+done
+if [ $stock = 0 ]; then
+  for o in "${overlays[@]}"; do files+=(-f "experimental/compose/$o.yaml"); done
+fi
+exec docker compose "${files[@]}" "${extra[@]}" "$@"
