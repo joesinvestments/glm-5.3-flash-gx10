@@ -136,13 +136,32 @@ _W4_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 _w4_ext = None
 
 
+def _jit_load(name, *args, **kwargs):
+    """torch's cpp_extension.load(), safe after a build was killed midway (#53).
+
+    torch marks a build with a `lock` file and waits forever on one it finds, so a
+    build killed midway hangs every later load with nothing in the log. Builds here
+    also hold an flock, which the kernel drops when its holder dies: whoever holds
+    it is the only builder, and any `lock` file it finds is stale."""
+    import fcntl
+
+    from torch.utils.cpp_extension import _get_build_directory, load
+
+    build = _get_build_directory(name, False)
+    with open(os.path.join(build, "lock.flock"), "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            os.remove(os.path.join(build, "lock"))
+        except FileNotFoundError:
+            pass
+        return load(name, *args, **kwargs)
+
+
 def _w4():
     global _w4_ext
     if _w4_ext is None:
-        from torch.utils.cpp_extension import load
-
-        _w4_ext = load("megadense4", [os.environ.get("VLLM_MEGADENSE4_SRC", "/opt/megamoe/megadense4.cu")],
-                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
+        _w4_ext = _jit_load("megadense4", [os.environ.get("VLLM_MEGADENSE4_SRC", "/opt/megamoe/megadense4.cu")],
+                            extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
     return _w4_ext
 
 

@@ -37,24 +37,41 @@ _check_left = int(os.environ.get("VLLM_MOE_PREFILL_CHECK", "0"))
 _PREFILL_Y8 = os.environ.get("VLLM_MOE_PREFILL_Y8") == "1"
 _ext = None
 _pext = None
+
+
+def _jit_load(name, *args, **kwargs):
+    """torch's cpp_extension.load(), safe after a build was killed midway (#53).
+
+    torch marks a build with a `lock` file and waits forever on one it finds, so a
+    build killed midway hangs every later load with nothing in the log. Builds here
+    also hold an flock, which the kernel drops when its holder dies: whoever holds
+    it is the only builder, and any `lock` file it finds is stale."""
+    import fcntl
+
+    from torch.utils.cpp_extension import _get_build_directory, load
+
+    build = _get_build_directory(name, False)
+    with open(os.path.join(build, "lock.flock"), "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            os.remove(os.path.join(build, "lock"))
+        except FileNotFoundError:
+            pass
+        return load(name, *args, **kwargs)
 _scratch: dict = {}
 
 
 def _load():
     global _ext
     if _ext is None:
-        from torch.utils.cpp_extension import load
-
-        _ext = load("megamoe_rm", [_SRC], extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
+        _ext = _jit_load("megamoe_rm", [_SRC], extra_cuda_cflags=["-O3", "-gencode=arch=compute_121a,code=sm_121a"])
     return _ext
 
 
 def _load_prefill():
     global _pext
     if _pext is None:
-        from torch.utils.cpp_extension import load
-
-        _pext = load("moe_prefill", [_PREFILL_SRC], extra_cuda_cflags=[
+        _pext = _jit_load("moe_prefill", [_PREFILL_SRC], extra_cuda_cflags=[
             "-O3", "-gencode=arch=compute_121a,code=sm_121a", "-DMOE_STAGES=2", "-DMOE_MINB=2", "-DMOE_PREFETCH=5"])
     return _pext
 

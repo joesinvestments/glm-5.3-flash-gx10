@@ -90,12 +90,31 @@ def fabric(world: int, who: str):
     return hcas, [gid, gid], False
 
 
+def _jit_load(name, *args, **kwargs):
+    """torch's cpp_extension.load(), safe after a build was killed midway (#53).
+
+    torch marks a build with a `lock` file and waits forever on one it finds, so a
+    build killed midway hangs every later load with nothing in the log. Builds here
+    also hold an flock, which the kernel drops when its holder dies: whoever holds
+    it is the only builder, and any `lock` file it finds is stale."""
+    import fcntl
+
+    from torch.utils.cpp_extension import _get_build_directory, load
+
+    build = _get_build_directory(name, False)
+    with open(os.path.join(build, "lock.flock"), "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            os.remove(os.path.join(build, "lock"))
+        except FileNotFoundError:
+            pass
+        return load(name, *args, **kwargs)
+
+
 def _load():
     global _ext
     if _ext is None:
-        from torch.utils.cpp_extension import load
-
-        _ext = load(
+        _ext = _jit_load(
             "arx_vllm",
             [os.path.join(os.path.dirname(__file__), "arx_vllm.cu")],
             extra_cuda_cflags=["-O3", "-std=c++17", "-gencode=arch=compute_121a,code=sm_121a"],
@@ -189,11 +208,9 @@ class ArxBig:
         slot -= slot % (world * 16)
         with torch.cuda.device(device):
             if _big_ext is None:
-                from torch.utils.cpp_extension import load
-
-                _big_ext = load("arxbig", [os.path.join(os.path.dirname(__file__), "arxbig.cu")],
-                                extra_cuda_cflags=["-O3", "-std=c++17", "-gencode=arch=compute_121a,code=sm_121a"],
-                                extra_ldflags=["-libverbs"])
+                _big_ext = _jit_load("arxbig", [os.path.join(os.path.dirname(__file__), "arxbig.cu")],
+                                     extra_cuda_cflags=["-O3", "-std=c++17", "-gencode=arch=compute_121a,code=sm_121a"],
+                                     extra_ldflags=["-libverbs"])
             self.rs = os.environ.get("VLLM_ARXBIG_RS") == "1"
             info = _big_ext.prepare(rank, world, devs, gids, ring, slot, slot if self.rs else 0)
             infos: list[bytes] = [b""] * world
