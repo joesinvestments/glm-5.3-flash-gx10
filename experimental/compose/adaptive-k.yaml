@@ -6,6 +6,10 @@
 # VLLM_DRAFT_TRUNC_TAU. Dead drafts keep the verify shape, skip their MoE
 # experts and are rejected, so outputs are unchanged. Every
 # VLLM_DRAFT_TRUNC_EXPLORE-th step skips the cut and trains the estimator.
+# disable_eagle_block_drop: vLLM drops the last matching prefix-cache block for
+# EAGLE-style drafters, 2,304 tokens here at TP=4, and every cache hit then
+# recomputes it. With the drop off, an agent turn's time to first token falls by
+# about a third and the output is identical (#54).
 services:
   glm53:
     volumes:
@@ -17,7 +21,7 @@ services:
       - ../experimental/draft-trunc/speculator.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/speculator.py:ro
       - ../experimental/draft-trunc/dflash2_speculator.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/dflash2/speculator.py:ro
     environment:
-      - EXTRA_ARGS=--scheduler-cls vllm.v1.core.sched.adaptive_k.AdaptiveKScheduler --speculative-config {"method":"dflash","model":"/models/glm-5.3-flash-dflash2","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","num_speculative_tokens_per_batch_size":[[1,1,7],[2,2,5],[3,3,4],[4,4,3],[5,5,2],[6,32,7]]}
+      - EXTRA_ARGS=--scheduler-cls vllm.v1.core.sched.adaptive_k.AdaptiveKScheduler --speculative-config {"method":"dflash","disable_eagle_block_drop":true,"model":"/models/glm-5.3-flash-dflash2","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","num_speculative_tokens_per_batch_size":[[1,1,7],[2,2,5],[3,3,4],[4,4,3],[5,5,2],[6,32,7]]}
       - VLLM_ADAPTIVE_K_CONTROL=/root/.cache/adaptive-k
       - VLLM_DRAFT_TRUNC_TAU=${VLLM_DRAFT_TRUNC_TAU:-0.3}
       - VLLM_DRAFT_TRUNC_EXPLORE=${VLLM_DRAFT_TRUNC_EXPLORE:-4}
