@@ -785,6 +785,35 @@ case "$SPEC_METHOD" in
   none) ;;
   *) echo "FATAL: SPEC_METHOD=$SPEC_METHOD; want mtp, dflash or none" >&2; exit 1 ;;
 esac
+# SPEC_EXTRA: more keys for the speculative config above, as one JSON object.
+# adaptive-k.yaml puts its per-batch-size draft widths, the drafter's attention
+# backend and disable_eagle_block_drop here. They used to arrive as a second
+# --speculative-config in EXTRA_ARGS, and vLLM keeps the last one, so whenever
+# that overlay was loaded SPEC_METHOD, SPEC_TOKENS and DFLASH_MODEL were
+# silently ignored (SPEC_METHOD=mtp still served DFlash2). Draft widths above
+# SPEC_TOKENS are capped to it.
+if [[ ${#SPEC[@]} -gt 0 && "${EXTRA_ARGS:-}" == *--speculative-config* ]]; then
+  echo "FATAL: EXTRA_ARGS sets --speculative-config too. vLLM keeps the last one, so SPEC_METHOD," \
+       "SPEC_TOKENS and DFLASH_MODEL would be ignored. Put extra keys in SPEC_EXTRA (a JSON object) instead." >&2
+  exit 1
+fi
+if [[ -n "${SPEC_EXTRA:-}" ]]; then
+  if [[ "$SPEC_METHOD" != dflash ]]; then
+    echo "FATAL: SPEC_EXTRA is set (adaptive-k.yaml sets it, tuned for DFlash2) but SPEC_METHOD=$SPEC_METHOD." \
+         "Start without experimental/compose/adaptive-k.yaml to run $SPEC_METHOD." >&2
+    exit 1
+  fi
+  SPEC[1]=$(python3 -c '
+import json, sys
+spec, extra = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+if not isinstance(extra, dict): sys.exit("SPEC_EXTRA must be a JSON object")
+fixed = sorted(set(extra) & {"method", "model", "num_speculative_tokens"})
+if fixed: sys.exit("SPEC_EXTRA must not set " + ", ".join(fixed) + ": use SPEC_METHOD, DFLASH_MODEL and SPEC_TOKENS")
+n = spec["num_speculative_tokens"]
+for row in extra.get("num_speculative_tokens_per_batch_size", []): row[2] = min(row[2], n)
+spec.update(extra)
+print(json.dumps(spec, separators=(",", ":")))' "${SPEC[1]}" "$SPEC_EXTRA") || { echo "FATAL: SPEC_EXTRA: see above ($SPEC_EXTRA)" >&2; exit 1; }
+fi
 [[ ${#SPEC[@]} -gt 0 ]] && echo "speculative: ${SPEC[*]}"
 
 stage loading
@@ -893,12 +922,12 @@ else
   # new prompt, so stop at the largest decode step: 32 tokens at TP=2 instead
   # of 64, for example. Those mixed steps run without a graph.
   # A draft width that varies with batch size (adaptive-k.yaml's
-  # num_speculative_tokens_per_batch_size) decodes 1 + k tokens per request
+  # num_speculative_tokens_per_batch_size, through SPEC_EXTRA) decodes 1 + k tokens per request
   # for each k in the schedule: 3, 5, 6, 10, 12, 15. vLLM adds those sizes to
   # its capture list only when it picks the ceiling itself, so an explicit cap
   # leaves them to run without a full graph. Leave the ceiling to vLLM there,
   # unless CUDAGRAPH_MAX sets one.
-  if [[ -z "${CUDAGRAPH_MAX:-}" && "${EXTRA_ARGS:-}" == *num_speculative_tokens_per_batch_size* ]]; then
+  if [[ -z "${CUDAGRAPH_MAX:-}" && "${SPEC[*]:-}" == *num_speculative_tokens_per_batch_size* ]]; then
     echo "MoE backend: ${MOE_BACKEND}, vLLM's own CUDA graph sizes (draft width varies with batch size)"
   else
     _q=1; [[ -n "$SPEC_METHOD" && "$SPEC_METHOD" != none ]] && _q=$(( SPEC_TOKENS + 1 ))

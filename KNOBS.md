@@ -68,6 +68,7 @@ Meaning and rationale stay in the entrypoint and compose comments.
 | `SERVICE_NAME` | `glm53` |
 | `SHARED_TAG` | `glm53-${_arch}-${_kv}` _(derived)_ |
 | `SKIP_MM_PROFILING` | `0` |
+| `SPEC_EXTRA` | _(empty)_ |
 | `SPEC_METHOD` | `dflash` |
 | `SPEC_TOKENS` | `7` |
 | `STAGE_FILE` | `/tmp/glm53-stage` |

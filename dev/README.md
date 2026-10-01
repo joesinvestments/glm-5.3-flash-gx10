@@ -1,1 +1,1 @@
-Dev-only material that is not in the image: the token-corruption diagnosis and its repros, kernel tests, patch tests and the step tap.
+Dev-only material that is not in the image: the token-corruption diagnosis and its repros, kernel tests, patch tests, the step tap, and `entrypoint-spec-test.sh` (the entrypoint's speculative config under each setting, no GPU needed).

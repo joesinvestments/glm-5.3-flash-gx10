@@ -152,6 +152,7 @@ services:
       - MTP=${MTP:-}
       - SPEC_METHOD=${SPEC_METHOD:-}
       - SPEC_TOKENS=${SPEC_TOKENS:-}
+      - SPEC_EXTRA=${SPEC_EXTRA:-}
       - DFLASH_MODEL=${DFLASH_MODEL:-}
       - MODEL_DIR=${MODEL_DIR:-}
       # Default and KV arithmetic in the entrypoint. Raise it against the

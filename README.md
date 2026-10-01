@@ -99,7 +99,8 @@ here.
     (`DFLASH_HOST_DIR`). It is licensed CC BY-NC-ND
     4.0, non-commercial; check that before you serve it. `SPEC_METHOD=mtp`
     uses the checkpoint's own MTP head instead, slower but with no second
-    download.
+    download. Start that without `experimental/compose/adaptive-k.yaml`, which
+    is tuned for DFlash2; the entrypoint refuses the combination.
 
   `hf download` is resumable:
 
