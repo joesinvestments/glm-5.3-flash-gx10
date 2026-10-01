@@ -541,7 +541,13 @@ streamed tool call and page cache reports, [#7](https://github.com/mmastrac/glm-
 [ayayalar](https://github.com/ayayalar) (the first-boot stall report behind the
 fabric check, [#5](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/issues/5)) ·
 [stevededrick](https://github.com/stevededrick) (the arx idle backoff,
-[#59](https://github.com/kindlingai/glm-5.3-flash-gx10/pull/59))
+[#59](https://github.com/kindlingai/glm-5.3-flash-gx10/pull/59)) ·
+[sdougbrown](https://github.com/sdougbrown) (the EAGLE block drop,
+[#54](https://github.com/kindlingai/glm-5.3-flash-gx10/issues/54), and the stale JIT
+lock, [#53](https://github.com/kindlingai/glm-5.3-flash-gx10/issues/53)) ·
+[calvarado2004](https://github.com/calvarado2004) (the arx ring at three ranks,
+[#57](https://github.com/kindlingai/glm-5.3-flash-gx10/pull/57), and the stock tool
+parser default, [#58](https://github.com/kindlingai/glm-5.3-flash-gx10/pull/58))
 
 The files in `experimental/` that replace vLLM and FlashInfer files keep their
 Apache-2.0 headers, and [experimental/README.md](experimental/README.md#sources)
