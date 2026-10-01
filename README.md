@@ -547,7 +547,9 @@ fabric check, [#5](https://github.com/mmastrac/glm-5.3-flash-4x-gx10/issues/5)) 
 lock, [#53](https://github.com/kindlingai/glm-5.3-flash-gx10/issues/53)) ·
 [calvarado2004](https://github.com/calvarado2004) (the arx ring at three ranks,
 [#57](https://github.com/kindlingai/glm-5.3-flash-gx10/pull/57), and the stock tool
-parser default, [#58](https://github.com/kindlingai/glm-5.3-flash-gx10/pull/58))
+parser default, [#58](https://github.com/kindlingai/glm-5.3-flash-gx10/pull/58)) ·
+[tfolkman](https://github.com/tfolkman) (how a killed worker leaves the JIT lock,
+[#53](https://github.com/kindlingai/glm-5.3-flash-gx10/issues/53))
 
 The files in `experimental/` that replace vLLM and FlashInfer files keep their
 Apache-2.0 headers, and [experimental/README.md](experimental/README.md#sources)
