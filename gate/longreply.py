@@ -6,7 +6,7 @@ cache_salt each) with their decode-time logprobs, rescores the same token ids as
 a prompt (prompt_logprobs), and compares the two per 2,000-token window.
 
 On this stack decode and prefill differ by design (batch-size invariance traded
-for speed), so the absolute gap is not the signal: a flat 0.12-0.24 nats mean
+for speed), so the absolute gap is not the signal: a flat 0.11-0.24 nats mean
 |diff| from the first window to the last is normal here. The signal is growth:
 a reply that degrades as it gets longer (a broken drafter, a cache or state bug
 that compounds) shows windows late in the reply well above its first ones.
